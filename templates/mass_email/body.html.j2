@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<body style="font-family: Arial, sans-serif; color:#222;">
+<p>Hi {{ recipient_email.split('@')[0] }},</p>
+
+<p>
+This is {{ full_name }}.  
+I came across your profile and thought I’d reach out directly.
+</p>
+
+<p>
+{{ candidate_intro }}
+</p>
+
+<p>
+If this isn’t relevant, no worries at all.
+</p>
+
+<p>
+Best,<br>
+<strong>{{ full_name }}</strong><br>
+{% if linkedin_url %}<a href="{{ linkedin_url }}">LinkedIn Profile</a><br>{% endif %}
+Email: {{ candidate_email }}
+</p>
+
+<hr style="border:none; border-top:1px solid #eee; margin:20px 0;">
+
+<p style="font-size:11px; color:#999;">
+    To stop receiving these emails, you can <a href="{{ unsubscribe_link }}" style="color:#999;">Unsubscribe</a>
+</p>
+</body>
+</html>
