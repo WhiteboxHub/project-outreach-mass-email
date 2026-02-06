@@ -1,15 +1,18 @@
 Hi,
 
-This is {{ full_name }}.
-
+I hope you're doing well.
 
 {{ candidate_intro }}
 
-If this isn’t relevant, no worries at all.
+Thank you for your time, and I truly appreciate any guidance or direction you may be able to share.
 
-Best,
+Best regards,
 {{ full_name }}
-{% if linkedin_url %}LinkedIn: {{ linkedin_url }}{% endif %}
+
+{% if linkedin_id %}
+{% set full_url = linkedin_id if 'linkedin.com' in linkedin_id else 'https://www.linkedin.com/in/' + linkedin_id %}
+LinkedIn Profile: {{ full_url }}
+{% endif %}
 Email: {{ candidate_email }}
 
 ---
