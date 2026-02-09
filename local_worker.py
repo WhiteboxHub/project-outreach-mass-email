@@ -157,3 +157,8 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Stopping...")
         service_process.terminate()
+        service_process.join(timeout=3)
+        if service_process.is_alive():
+            logger.warning("Email service didn't stop. Forcing kill...")
+            service_process.kill()
+        logger.info("Stopped.")
