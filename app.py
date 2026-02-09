@@ -4,6 +4,7 @@ from typing import List, Optional, Dict
 import os
 import json
 import logging
+import time
 from csv_loader import CSVLoader
 from email_factory import EmailFactory
 
@@ -139,6 +140,20 @@ async def send_emails(payload: EmailProgramPayload):
         
         # 4. Process provided recipients
         for idx, recipient in enumerate(recipients_to_process):
+            # --- REAL-TIME STOP CHECK ---
+            try:
+                prod_url = os.getenv("PROD_API_URL")
+                if prod_url:
+                    status_resp = requests.get(f"{prod_url}/api/remote/runs/{payload.job_run_id}/status", timeout=5)
+                    if status_resp.status_code == 200:
+                        status_data = status_resp.json()
+                        current_status = status_data.get("status")
+                        if current_status not in ["RUNNING", "PENDING"]:
+                            logger.warning(f"!!! Job {payload.job_run_id} status changed to {current_status}. Stopping execution immediately.")
+                            break
+            except Exception as se:
+                logger.warning(f"Could not verify job status: {se}. Continuing...")
+
             email_addr = recipient.email.strip().lower()
             logger.debug(f"   [{idx+1}/{items_total}] Processing: {email_addr}")
             
@@ -207,6 +222,12 @@ async def send_emails(payload: EmailProgramPayload):
                 items_failed += 1
                 logger.error(f"       Unexpected error for {email_addr}: {e}")
                 logger.error(traceback.format_exc())
+
+            # Add delay between emails if there are more to send
+            email_delay = int(os.getenv("EMAIL_DELAY", "10"))
+            if idx < items_total - 1:
+                logger.debug(f"Waiting {email_delay} seconds before next email...")
+                time.sleep(email_delay)
 
         logger.info("=" * 80)
         logger.info(f"SEND COMPLETE")

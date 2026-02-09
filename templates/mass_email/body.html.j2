@@ -3,72 +3,36 @@
 <head>
     <style>
         body { 
-            font-family: Arial, sans-serif; 
-            line-height: 1.6; 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; 
+            font-size: 14px;
+            line-height: 1.5; 
             color: #333; 
         }
-        .container { 
-            max-width: 600px; 
-            margin: 0 auto; 
-            padding: 20px; 
-        }
-        .content {
-            margin: 20px 0;
-        }
-        .content p {
-            margin-bottom: 18px; 
-            margin-top: 0;
-        }
-        .signature { 
-            margin-top: 30px; 
-        }
-        .contact { 
-            margin-top: 15px; 
-            color: #666; 
-        }
+        p { margin-bottom: 16px; }
         .footer { 
-            margin-top: 30px; 
-            padding-top: 20px; 
-            border-top: 1px solid #ddd; 
-            font-size: 12px; 
-            color: #888; 
+            margin-top: 40px; 
+            font-size: 11px; 
+            color: #999; 
         }
+        a { color: #007bff; text-decoration: none; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <p>Hi,</p>
-        <p>I hope you're doing well.</p>
-        
-        <div class="content">
-            {# We replace double-spaces and asterisks with newlines, then split and wrap in <p> tags #}
-            {% set formatted_intro = candidate_intro.replace('  ', '\n').replace('* ', '\n* ') %}
-            {% for para in formatted_intro.split('\n') %}
-                {% if para.strip() %}
-                    <p>{{ para.strip() }}</p>
-                {% endif %}
-            {% endfor %}
-        </div>
+    <p>Hi,</p>
+    <p>I hope you're doing well.</p>
+    
+    <p>{{ candidate_intro }}</p>
 
-        <p>Thank you for your time, and I truly appreciate any guidance or direction you may be able to share.</p>
+    <p>I’m currently exploring opportunities that align with my experience and would appreciate the chance to connect if there’s a potential fit.</p>
 
-        <div class="signature">
-            <p>Best regards,<br>
-            <strong>{{ full_name }}</strong></p>
-        </div>
+    {% set full_url = linkedin_id if (linkedin_id and 'linkedin.com' in linkedin_id) else (('https://www.linkedin.com/in/' + linkedin_id) if linkedin_id else '') %}
+    {% if full_url %}
+    <p>You can find more details on my background here: <a href="{{ full_url }}">{{ full_url }}</a></p>
+    {% endif %}
 
-        <div class="contact">
-            {% if linkedin_id %}
-                {% set display_id = linkedin_id.split('/')[-1] if '/' in linkedin_id else linkedin_id %}
-                {% set full_url = linkedin_id if 'linkedin.com' in linkedin_id else 'https://www.linkedin.com/in/' + linkedin_id %}
-                <p>LinkedIn Profile: <a href="{{ full_url }}">{{ display_id }}</a></p>
-            {% endif %}
-            <p>Email: <a href="mailto:{{ candidate_email }}">{{ candidate_email }}</a></p>
-        </div>
+    <p>Best,<br>
+    {{ full_name }}<br>
+    {{ candidate_email }}</p>
 
-        <div class="footer">
-            <p><a href="{{ unsubscribe_link }}">Unsubscribe from future emails</a></p>
-        </div>
-    </div>
 </body>
 </html>
