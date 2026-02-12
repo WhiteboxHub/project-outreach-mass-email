@@ -1,20 +1,15 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Dict, Any, Optional
 
 class BaseSender(ABC):
     @abstractmethod
-    def send(
-        self,
-        from_email: str,
-        reply_to: str,
-        to_email: str,
-        subject: str,
-        html_body: str,
-        text_body: str,
-        headers: Optional[dict] = None,
-        from_name: Optional[str] = None
-    ) -> bool:
-        """
-        Sends an email. Returns True if successful, False otherwise.
-        """
+    async def send(self, 
+             from_email: str, 
+             to_email: str, 
+             subject: str, 
+             html_body: str, 
+             text_body: str = None, 
+             from_name: str = None,
+             reply_to: str = None,
+             headers: Dict[str, str] = None) -> bool:
         pass

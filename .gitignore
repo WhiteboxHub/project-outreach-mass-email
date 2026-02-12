@@ -29,3 +29,5 @@ worker.log
 # OS
 .DS_Store
 Thumbs.db
+output/
+.pytest_cache/
