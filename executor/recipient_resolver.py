@@ -1,51 +1,46 @@
 from typing import List, Dict, Any
 from models.recipient import Recipient
+from api_clients.workflow_client import WorkflowClient
+import logging
+
+logger = logging.getLogger("outreach_service")
 
 class RecipientResolver:
     """
-    Mocks the resolution of recipients based on 'SQL' queries.
-    In a real scenario, this would execute the SQL against the database.
-    Here, we parse the intent or return mock data based on the prompt.
+    Resolves recipients by calling the backend API to execute SQL.
     """
-    
-    def resolve(self, recipient_sql: str) -> List[Recipient]:
-        # Mock logic based on the sample SQL provided in the prompt
-        
-        if "daily_outreach_flag = 1" in recipient_sql:
-            # Mock for Daily Vendor Outreach
-            return [
-                Recipient(
-                    email="vendor1@example.com",
-                    name="John Vendor",
-                    metadata={
-                        "contact_name": "John Vendor",
-                        "candidate_name": "Sampath Velupula",
-                        "linkedin_url": "https://linkedin.com/in/sampath"
-                    }
-                ),
-                 Recipient(
-                    email="vendor2@example.com",
-                    name="Jane Supplier",
-                    metadata={
-                        "contact_name": "Jane Supplier",
-                        "candidate_name": "Sampath Velupula",
-                        "linkedin_url": "https://linkedin.com/in/sampath"
-                    }
-                )
-            ]
-        elif "weekly_outreach_flag = 1" in recipient_sql:
-            # Mock for Weekly
-            return [
-                Recipient(
-                    email="recruiter1@agency.com",
-                    name="Recruiter Bob",
-                    metadata={
-                        "contact_name": "Recruiter Bob",
-                        "candidate_name": "Sampath Velupula",
-                        "linkedin_url": "https://linkedin.com/in/sampath",
-                        "specialty_area": "MLOps"
-                    }
-                )
-            ]
-        
-        return []
+    def __init__(self):
+        self.workflow_client = WorkflowClient()
+
+    def resolve(self, workflow_id: int, recipient_sql: str, parameters: Dict[str, Any] = {}) -> List[Recipient]:
+        recipients = []
+        try:
+            # Execute SQL via API
+            # Ideally we pass workflow_id so backend can validat/scope queries if needed
+            # But here we just use the execute endpoint
+            
+            # Note: WorkflowClient needs to be updated to support this method we added earlier
+            result = self.workflow_client.execute_sql(workflow_id, recipient_sql, parameters)
+            
+            for data in result:
+                # Expect columns: recipient_email, recipient_name (optional), other metadata
+                email = data.get("recipient_email") or data.get("email") # Fallback
+                name = data.get("recipient_name") or data.get("name") or data.get("contact_name")
+                
+                # Metadata is everything else
+                metadata = data.copy()
+                metadata.pop("recipient_email", None)
+                # metadata.pop("recipient_name", None) 
+                
+                if email:
+                    recipients.append(Recipient(
+                        email=email,
+                        name=name,
+                        metadata=metadata
+                    ))
+            
+            return recipients
+            
+        except Exception as e:
+            logger.error(f"Error resolving recipients: {e}")
+            return []

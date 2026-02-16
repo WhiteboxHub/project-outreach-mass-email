@@ -36,8 +36,12 @@ class SchedulerLoop:
     async def _tick(self):
         """Process one tick of the scheduler."""
         # fetch due schedules
-        schedules = self.schedule_client.list({"status": "active"})
-        now = datetime.now() # naive for mock comparison
+        if hasattr(self.schedule_client, 'list_due'):
+             schedules = self.schedule_client.list_due()
+        else:
+             schedules = self.schedule_client.list({"status": "active"})
+        
+        now = datetime.now() 
         
         for schedule in schedules:
             next_run = schedule.get("next_run_at")

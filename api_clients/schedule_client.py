@@ -1,22 +1,31 @@
 from typing import Any, Dict, List, Optional
 from api_clients.base_client import BaseClient
+import logging
+
+logger = logging.getLogger("outreach_service")
 
 class ScheduleClient(BaseClient):
-    MOCK_DATA = [
-        {
-            "id": 1,
-            "automation_workflow_id": 1,
-            "timezone": "America/Los_Angeles",
-            "cron_expression": "0 8 * * *",
-            "frequency": "daily",
-            "interval_value": 1,
-            "next_run_at": "2026-02-10 08:00:00",
-            "enabled": True
-        }
-    ]
+    
+    def list_due(self) -> List[Dict[str, Any]]:
+        # Call orchestration endpoint
+        result = self._get("/orchestrator/schedules/due")
+        return result if result else []
 
     def get(self, resource_id: int) -> Optional[Dict[str, Any]]:
-        return next((item for item in self.MOCK_DATA if item["id"] == resource_id), None)
+        # Call orchestration endpoint
+        try:
+             return self._get(f"/orchestrator/schedules/{resource_id}")
+        except Exception as e:
+             logger.error(f"Error getting schedule {resource_id}: {e}")
+             return None
 
-    def list(self, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-         return self.MOCK_DATA
+    def lock_schedule(self, resource_id: int) -> bool:
+        resp = self._post(f"/orchestrator/schedules/{resource_id}/lock")
+        return resp.get("success", False) if resp else False
+
+    def update(self, resource_id: int, updates: Dict[str, Any]) -> bool:
+        # Use orchestrator update as it handles dynamic updates more gracefully than standard PUT usually which expects full object
+        # Or check if automation-workflow-schedule PUT supports partial update (it did exclude_unset=True).
+        # Orchestrator update specifically crafted for this service.
+        resp = self._put(f"/orchestrator/schedules/{resource_id}", json=updates)
+        return resp.get("success", False) if resp else False

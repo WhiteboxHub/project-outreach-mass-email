@@ -3,6 +3,9 @@ from pydantic import BaseModel
 import logging
 from typing import Optional
 import uuid
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from executor.workflow_executor import WorkflowExecutor
 from utils.logger import setup_logger

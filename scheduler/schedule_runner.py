@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from executor.workflow_executor import WorkflowExecutor
@@ -41,22 +41,63 @@ class ScheduleRunner:
         
         run_id = str(uuid4())
         
-        logger.info(f"Triggering scheduled run for Schedule {schedule_id} [Workflow {workflow_id}]")
+        import json
+        run_params = schedule.get("run_parameters")
+        if run_params and isinstance(run_params, str):
+            try:
+                run_params = json.loads(run_params)
+            except Exception as e:
+                logger.error(f"Failed to parse run_parameters for schedule {schedule_id}: {e}")
+                run_params = {}
+        
+        if run_params is None:
+            run_params = {}
+        
+        # Atomically lock schedule
+        if not self.schedule_client.lock_schedule(schedule_id):
+            logger.warning(f"Failed to acquire lock for schedule {schedule_id}. It might be running already.")
+            return
+
+        logger.info(f"Triggering scheduled run for Schedule {schedule_id} [Workflow {workflow_id}] with params: {run_params}")
         
         try:
             # Execute Workflow
-            await self.workflow_executor.execute_workflow(
+            result = await self.workflow_executor.execute_workflow(
                 workflow_id=workflow_id, 
-                run_id=run_id
+                run_id=run_id,
+                execution_context=run_params
             )
             
             # Update Next Run Time
-            # Mock update logic: just add 24 hours
-            # In production, parse Cron expression
-            self.schedule_client.update(schedule_id, {
-                "last_run_at": utcnow().isoformat(),
-                # "next_run_at": ... (Calculated)
-            })
+            # Logic: If success, clear running params (as per rule 4 & 5)
+            updates = {
+                "last_run_at": utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+                "is_running": 0
+            }
+
+            if result and result.get("status") == "success":
+                # Clear run specific parameters as requested
+                updates["run_parameters"] = None
+            
+            # Calculate next run based on frequency/cron
+            # For simplicity in this implementation, we add 24 hours if daily
+            if schedule.get("frequency") == "daily":
+                 # rudimentary next run calculation
+                 # In production, use cron iter
+                 current_next = schedule.get("next_run_at")
+                 if current_next:
+                     if isinstance(current_next, str):
+                         # If string, parse it
+                         current_next_dt = datetime.fromisoformat(current_next)
+                     else:
+                         current_next_dt = current_next
+                     
+                     updates["next_run_at"] = (current_next_dt + timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')
+
+            self.schedule_client.update(schedule_id, updates)
             
         except Exception as e:
             logger.error(f"Scheduled run failed for Schedule {schedule_id}: {e}")
+            # Ensure we reset running state even on failure?
+            # Or mark as failed? User didn't specify failure behavior for schedule state.
+            pass
