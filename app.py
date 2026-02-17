@@ -17,8 +17,6 @@ logger = logging.getLogger("outreach_service")
 from scheduler.scheduler_loop import SchedulerLoop
 import asyncio
 
-app = FastAPI(title="Outreach Service", version="1.0.0")
-
 from contextlib import asynccontextmanager
 
 # Global Scheduler Instance
