@@ -30,7 +30,7 @@ class WorkflowExecutor:
         self.recipient_resolver = RecipientResolver()
         self.template_renderer = TemplateRenderer()
 
-    async def execute_workflow(self, workflow_id: int = None, workflow_key: str = None, run_id: str = "manual_run", timeout_seconds: int = 3600, execution_context: Dict[str, Any] = {}):
+    async def execute_workflow(self, workflow_id: int = None, workflow_key: str = None, run_id: str = "manual_run", schedule_id: int = None, timeout_seconds: int = 3600, execution_context: Dict[str, Any] = {}):
         """
         Executes a workflow by ID or Key asynchronously with concurrency and rate limiting.
         """
@@ -69,10 +69,11 @@ class WorkflowExecutor:
         # Create execution log - STATE: QUEUED -> INITIALIZING
         log_entry = {
             "workflow_id": workflow_id,
+            "schedule_id": schedule_id,
             "run_id": run_id,
             "status": "queued",
             "started_at": start_time.isoformat(),
-            "parameters_used": json.dumps(execution_context)
+            "parameters_used": execution_context # Pass as dict, backend handles JSON
         }
         log_id = self.log_client.create(log_entry)
         
@@ -87,29 +88,38 @@ class WorkflowExecutor:
             
             self._update_status(log_id, "running")
 
-            # 2. Determine Engine
+            # 2. Fetch Candidate Metadata (if present)
+            if "candidate_id" in execution_context:
+                try:
+                    c_id = execution_context["candidate_id"]
+                    c_data = self.engine_client.get_candidate_credentials(c_id)
+                    if c_data:
+                        execution_context["candidate_email"] = c_data.get("email")
+                        execution_context["candidate_name"] = c_data.get("candidate_name") or "Candidate"
+                        execution_context["linkedin_url"] = c_data.get("linkedin_url") or ""
+                        execution_context["candidate_credentials"] = c_data # Store for engine config
+                        logger.info(f"Loaded metadata for Candidate {c_id}: {execution_context['candidate_name']}")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch candidate metadata for ID {execution_context['candidate_id']}: {e}")
+
+            # 3. Determine Engine
             engine_config = None
             use_candidate_smtp = params_config.get("engine") == "candidate_smtp"
             
             if use_candidate_smtp:
-                candidate_id = execution_context.get("candidate_id")
-                if not candidate_id:
-                    raise ValueError("Candidate ID required for candidate_smtp engine.")
-                
-                # Fetch Candidate Marketing Credentials via API
-                cand_data = self.engine_client.get_candidate_credentials(candidate_id)
+                cand_data = execution_context.get("candidate_credentials")
                 if not cand_data:
-                    raise ValueError(f"No active marketing record credentials found for candidate {candidate_id}")
+                    raise ValueError("No active marketing record credentials found/cached for candidate.")
                 
                 # Map to Engine Config
                 engine_config = {
                     "engine_type": "smtp",
-                    "host": "smtp.gmail.com", # Default heuristic
+                    "host": "smtp.gmail.com", 
                     "port": 587,
                     "username": cand_data.get("email"),
-                    "password": cand_data.get("password") or cand_data.get("imap_password"),
+                    "password": cand_data.get("imap_password") or cand_data.get("password"),
                     "from_email": cand_data.get("email"),
-                    "from_name": execution_context.get("candidate_name") or "Candidate",
+                    "from_name": execution_context.get("candidate_name"),
                     "rate_limit_per_minute": 30,
                     "batch_size": 5
                 }
@@ -127,19 +137,6 @@ class WorkflowExecutor:
                 # Use standard Delivery Engine
                 if workflow.get("delivery_engine_id"):
                     engine_config = self.engine_client.get(workflow["delivery_engine_id"])
-            
-            # ENSURE CANDIDATE METADATA is in context (for Reply-To etc)
-            if "candidate_id" in execution_context and "candidate_email" not in execution_context:
-                try:
-                    c_id = execution_context["candidate_id"]
-                    # If we already fetched it for cand_smtp, we can reuse. But for simplicity fetch if missing
-                    c_data = self.engine_client.get_candidate_credentials(c_id)
-                    if c_data:
-                        execution_context["candidate_email"] = c_data.get("email")
-                        if "candidate_name" not in execution_context:
-                             execution_context["candidate_name"] = c_data.get("full_name") or "Candidate"
-                except Exception as e:
-                    logger.warning(f"Failed to fetch candidate metadata for ID {execution_context['candidate_id']}: {e}")
                 
             if not engine_config:
                 raise ValueError("No valid engine configuration found.")
@@ -220,6 +217,15 @@ class WorkflowExecutor:
 
                         if sent:
                             success_count += 1
+                            # Execute per-recipient update SQL if configured
+                            recipient_update_sql = params_config.get("recipient_update_sql")
+                            if recipient_update_sql:
+                                try:
+                                    # We use the recipient's metadata as parameters for the update
+                                    self.workflow_client.execute_reset_sql(workflow_id, recipient_update_sql, context)
+                                except Exception as e:
+                                    logger.warning(f"Failed to execute per-recipient update SQL for {recipient.email}: {e}")
+                            
                             return {"email": recipient.email, "status": "success"}
                         else:
                             failed_count += 1

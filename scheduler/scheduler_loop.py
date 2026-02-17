@@ -35,16 +35,26 @@ class SchedulerLoop:
 
     async def _tick(self):
         """Process one tick of the scheduler."""
-        # fetch due schedules
-        if hasattr(self.schedule_client, 'list_due'):
-             schedules = self.schedule_client.list_due()
-        else:
-             schedules = self.schedule_client.list({"status": "active"})
+        logger.info("Scheduler tick: Checking for due schedules...")
         
+        # fetch due schedules
+        try:
+            if hasattr(self.schedule_client, 'list_due'):
+                 schedules = self.schedule_client.list_due()
+            else:
+                 schedules = self.schedule_client.list({"status": "active"})
+            
+            logger.info(f"API Response: Received {len(schedules)} schedules.")
+        except Exception as e:
+            logger.error(f"Failed to fetch schedules: {e}")
+            return
+
         now = datetime.now() 
+        logger.info(f"Current local time (for comparison): {now}")
         
         for schedule in schedules:
             next_run = schedule.get("next_run_at")
+            logger.info(f"Checking Schedule {schedule['id']}: Next Run At = {next_run}")
             if next_run:
                 try:
                     # simplistic parsing for mock string '2023-10-27T09:00:00'

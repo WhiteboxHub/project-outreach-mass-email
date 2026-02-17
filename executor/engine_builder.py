@@ -1,7 +1,8 @@
 from typing import Dict, Any
 from api_clients.delivery_engine_client import EngineType
 from senders.base_sender import BaseSender
-from senders.mock_senders import SMTPSender, MailgunSender, SendGridSender, AWSSESSender
+from senders.mock_senders import MailgunSender, SendGridSender, AWSSESSender
+from senders.smtp_sender import SMTPSender
 
 class EngineBuilder:
     @staticmethod

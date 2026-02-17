@@ -65,39 +65,51 @@ class ScheduleRunner:
             result = await self.workflow_executor.execute_workflow(
                 workflow_id=workflow_id, 
                 run_id=run_id,
+                schedule_id=schedule_id,
                 execution_context=run_params
             )
             
             # Update Next Run Time
-            # Logic: If success, clear running params (as per rule 4 & 5)
             updates = {
                 "last_run_at": utcnow().strftime('%Y-%m-%d %H:%M:%S'),
                 "is_running": 0
             }
 
+            # Clear run-specific parameters if explicitly requested (Success case)
             if result and result.get("status") == "success":
-                # Clear run specific parameters as requested
                 updates["run_parameters"] = None
             
-            # Calculate next run based on frequency/cron
-            # For simplicity in this implementation, we add 24 hours if daily
-            if schedule.get("frequency") == "daily":
-                 # rudimentary next run calculation
-                 # In production, use cron iter
-                 current_next = schedule.get("next_run_at")
-                 if current_next:
-                     if isinstance(current_next, str):
-                         # If string, parse it
-                         current_next_dt = datetime.fromisoformat(current_next)
-                     else:
-                         current_next_dt = current_next
-                     
-                     updates["next_run_at"] = (current_next_dt + timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')
+            # Calculate next run based on frequency
+            current_next = schedule.get("next_run_at")
+            if current_next:
+                current_next_dt = datetime.fromisoformat(current_next) if isinstance(current_next, str) else current_next
+                freq = schedule.get("frequency", "daily").lower()
+                
+                # Base delta
+                delta = timedelta(days=1)
+                if freq == "weekly":
+                    delta = timedelta(weeks=1)
+                elif freq == "monthly":
+                    delta = timedelta(days=30) # approximation, better logic would be calendrical
+                
+                # ADVANCE TO FUTURE: To prevent catch-up loops, move to the next valid slot >= NOW
+                now = datetime.now()
+                while current_next_dt <= now:
+                    current_next_dt += delta
+                
+                updates["next_run_at"] = current_next_dt.strftime('%Y-%m-%d %H:%M:%S')
 
             self.schedule_client.update(schedule_id, updates)
             
         except Exception as e:
             logger.error(f"Scheduled run failed for Schedule {schedule_id}: {e}")
-            # Ensure we reset running state even on failure?
-            # Or mark as failed? User didn't specify failure behavior for schedule state.
-            pass
+            self.schedule_client.update(schedule_id, {"is_running": 0})
+        finally:
+            # Final safety check to unlock if not updated by client
+            try:
+                # We fetch again to check if it's still locked
+                latest = self.schedule_client.get(schedule_id)
+                if latest and latest.get("is_running"):
+                    self.schedule_client.update(schedule_id, {"is_running": 0})
+            except:
+                pass
