@@ -120,8 +120,8 @@ class WorkflowExecutor:
                     "password": cand_data.get("imap_password") or cand_data.get("password"),
                     "from_email": cand_data.get("email"),
                     "from_name": execution_context.get("candidate_name"),
-                    "rate_limit_per_minute": 30,
-                    "batch_size": 5
+                    "rate_limit_per_minute": 15,
+                    "batch_size": 1
                 }
                 
                 # Simple host detection
@@ -213,10 +213,26 @@ class WorkflowExecutor:
                         html_body = self.template_renderer.render(template["content_html"], context)
                         text_body = self.template_renderer.render(template["content_text"], context) if template.get("content_text") else ""
 
+                        logger.info(f"   [SMTP] Sending email to {recipient.email}...")
                         sent = await _send_with_retry(recipient, context, subject, html_body, text_body, current_reply_to)
+                        
+                        # Add a small delay to avoid SMTP throttling
+                        await asyncio.sleep(2.0)
 
                         if sent:
+                            logger.info(f"   [SMTP] Success: {recipient.email}")
                             success_count += 1
+                        else:
+                            failed_count += 1
+
+                        # Periodic progress update to the DB (every 5 recipients)
+                        if (success_count + failed_count) % 5 == 0:
+                            try:
+                                self._update_status(log_id, "running", processed=success_count, failed=failed_count)
+                            except:
+                                pass
+
+                        if sent:
                             # Execute per-recipient update SQL if configured
                             recipient_update_sql = params_config.get("recipient_update_sql")
                             if recipient_update_sql:
@@ -228,7 +244,6 @@ class WorkflowExecutor:
                             
                             return {"email": recipient.email, "status": "success"}
                         else:
-                            failed_count += 1
                             return {"email": recipient.email, "status": "failed"}
 
                     except Exception as e:
@@ -238,8 +253,11 @@ class WorkflowExecutor:
 
             tasks = [process_recipient(r) for r in recipients]
             if tasks:
+                logger.info(f"Starting async sending for {len(tasks)} recipients...")
                 results = await asyncio.gather(*tasks)
                 recipient_results = results
+            
+            logger.info(f"Workflow execution finished. Success: {success_count}, Failed: {failed_count}")
             
             if datetime.now() > deadline:
                  self._update_status(log_id, "timed_out", error="Execution timed out during sending")
@@ -260,12 +278,15 @@ class WorkflowExecutor:
                     logger.error(f"Failed to execute reset SQL via API: {e}")
 
             # 8. Update Log
-            self.log_client.update(log_id, {
-                "status": final_status,
-                "records_processed": success_count,
-                "records_failed": failed_count,
-                "finished_at": datetime.now().isoformat()
-            })
+            try:
+                self.log_client.update(log_id, {
+                    "status": final_status,
+                    "records_processed": success_count,
+                    "records_failed": failed_count,
+                    "finished_at": datetime.now().isoformat()
+                })
+            except Exception as e:
+                logger.error(f"Failed to update final log status: {e}")
 
             return {
                 "status": "success",
