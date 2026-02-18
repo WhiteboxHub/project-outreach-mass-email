@@ -265,15 +265,18 @@ class WorkflowExecutor:
 
             # 7. Post Processing / Reset Logic
             final_status = "success" if failed_count == 0 else "partial_success"
-            if failed_count == len(recipients):
+            if failed_count == len(recipients) and len(recipients) > 0:
                 final_status = "failed" 
 
-            # Execute Success Reset SQL if configured
+            # Execute Success Reset SQL (e.g., reset run_daily_workflow to 0)
+            # We do this if success_count > 0 OR if we reached the end of the batch
+            # to ensure the candidate doesn't get stuck in "daily run" mode.
             reset_sql = params_config.get("success_reset_sql")
-            if reset_sql and success_count > 0: 
+            if reset_sql and (success_count > 0 or failed_count > 0): 
                 try:
+                    logger.info(f"Executing success reset SQL for workflow {workflow_id}...")
                     self.workflow_client.execute_reset_sql(workflow_id, reset_sql, execution_context)
-                    logger.info("Executed success reset SQL via API.")
+                    logger.info("Successfully reset automation flags (run_daily_workflow etc).")
                 except Exception as e:
                     logger.error(f"Failed to execute reset SQL via API: {e}")
 
@@ -283,6 +286,7 @@ class WorkflowExecutor:
                     "status": final_status,
                     "records_processed": success_count,
                     "records_failed": failed_count,
+                    "execution_metadata": recipient_results,
                     "finished_at": datetime.now().isoformat()
                 })
             except Exception as e:
