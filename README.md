@@ -8,26 +8,18 @@ A robust, async-first email outreach service built with **FastAPI**, **Python 3.
 - **Async Execution**: Powered by `asyncio` for non-blocking I/O.
 - **Concurrency Control**: Semaphores limit parallel execution per batch.
 - **Rate Limiting**: Token Bucket algorithm ensures compliance with provider limits.
-- **State Machine**: granular execution states (`QUEUED`, `INITIALIZING`, `SENDING`, `COMPLETED`, `FAILED`).
+- **State Machine**: Granular execution states (`QUEUED`, `INITIALIZING`, `SENDING`, `COMPLETED`, `FAILED`).
 
 ### Reliability & Safety
 - **Smart Retries**: Exponential backoff with jitter for transient errors (network, 429s).
 - **Template Safety**: Strict Jinja2 rendering (fails on missing variables) and pre-validation.
 - **Engine Hardening**: Strict validation of sender configuration (SMTP, SendGrid, SES, Mailgun).
-- **Global Timeout**: Enforced execution deadlines to prevent hung processes.
-
-### Scheduling
-- **Built-in Scheduler**: Background loop to poll and trigger scheduled workflows.
-- **Idempotency**: Prevents duplicate executions for the same schedule slot.
-
-### Observability
-- **Structured Logging**: Detailed JSON execution logs stored in `output/<date>/<run_id>.json`.
-- **Mock Clients**: Simulates backend dependencies for easy testing and development.
+- **Email Validation**: Pre-flight checks ensure emails have valid syntax and MX records before attempting delivery.
 
 ## Project Structure
 
 ```
-├── api_clients/        # Mock API clients (Workflow, Template, Engine, Schedule, Log)
+├── api_clients/        # Internal API clients (Workflow, Template, Engine, Schedule, Log)
 ├── executor/           # Core Logic
 │   ├── workflow_executor.py  # Main async orchestration
 │   ├── engine_builder.py     # Factory for email senders
@@ -35,9 +27,9 @@ A robust, async-first email outreach service built with **FastAPI**, **Python 3.
 │   └── recipient_resolver.py # SQL-to-Recipient resolver
 ├── models/             # Pydantic data models
 ├── scheduler/          # Background scheduler
-├── senders/            # Email provider implementations (Mocked)
+├── senders/            # Email provider implementations
 ├── tests/              # Pytest suite
-├── utils/              # Shared utilities (Retry, RateLimiter, Time, Idempotency)
+├── utils/              # Shared utilities (Retry, RateLimiter, Validation)
 ├── app.py              # FastAPI application entry point
 └── requirements.txt    # Dependencies
 ```
@@ -52,25 +44,56 @@ A robust, async-first email outreach service built with **FastAPI**, **Python 3.
 
 ```bash
 # Create venv
-python -m venv venv
+python3 -m venv venv
 source venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
 ```
 
-### Running the Application
+### Environment Variables (`.env`)
+You must create a `.env` file in the root directory. This configures the backend connection and the SMTP account used to send the **Summary Reports** (not the actual outreach emails, which are configured in the DB).
 
-Start the FastAPI server (and the background scheduler):
+Create a file named `.env` and configure it like this:
+
+```env
+WBL_BACKEND_URL=https://api.whitebox-learning.com/api
+LOG_LEVEL=INFO
+
+# --- Run Report Email Configuration ---
+# The address that will receive the final summary report
+REPORT_EMAIL_TO=your_email@domain.com
+
+# The authenticated SMTP account that sends the report
+REPORT_EMAIL_FROM=report_sender@domain.com
+REPORT_SMTP_HOST=smtp.gmail.com
+REPORT_SMTP_PORT=587
+REPORT_SMTP_USER=report_sender@domain.com
+REPORT_SMTP_PASSWORD=your_16_digit_app_password
+```
+
+## Running the Application
+
+### 1. Dry Run Validation (Previewing a Campaign)
+Before sending real emails, you can simulate a run. This fetches today's recipients from the database and runs validation (Syntax + MX Record checks) to show you exactly who will receive the email and who has an invalid email address. 
+
+**No emails are actually sent during this process.**
 
 ```bash
-uvicorn app:app --reload
+python dry_run_validation.py
+```
+
+### 2. Start the API Server & Background Scheduler
+Start the FastAPI server (which also boots up the background polling scheduler to execute scheduled outreach runs).
+
+```bash
+uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 - **Health Check**: `GET http://127.0.0.1:8000/health`
-- **Trigger Workflow**: `POST http://127.0.0.1:8000/api/v1/trigger`
+- **Manual Trigger**: `POST http://127.0.0.1:8000/api/v1/trigger`
 
-Example Payload:
+Example Trigger Payload:
 ```json
 {
   "workflow_id": 1
@@ -84,20 +107,3 @@ Execute the full test suite with `pytest`:
 ```bash
 python -m pytest
 ```
-
-## Configuration
-
-- **Delivery Engines**: Configured via Mock API (see `api_clients/delivery_engine_client.py`).
-- **Schedules**: Configured via Mock API (see `api_clients/schedule_client.py`).
-- **Templates**: html/text templates via Mock API (see `api_clients/template_client.py`).
-
-## Logging
-
-Execution results are saved to disk:
-`output/YYYY-MM-DD/<run_id>.json`
-
-Each log contains:
-- Workflow & Template Metadata
-- Execution Summary (Success/Fail counts)
-- Engine Configuration (Redacted)
-- Recipient-level status (Success/Failed)

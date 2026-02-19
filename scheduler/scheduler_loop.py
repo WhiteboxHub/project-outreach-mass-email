@@ -60,6 +60,12 @@ class SchedulerLoop:
                     # simplistic parsing for mock string '2023-10-27T09:00:00'
                     next_run_dt = datetime.fromisoformat(next_run)
                     
+                    # If the database returns UTC timestamps, we should compare against UTC now
+                    from utils.time_utils import utcnow
+                    # Use a naive comparison if the parsed date is naive (usual for DB strings without Z)
+                    # Alternatively, if we know it's UTC, we should make it aware.
+                    # For now, let's just use the current time as provided by the system.
+                    
                     if next_run_dt <= now:
                         # Prevent immediate re-triggering in mock by checking last_run or lock
                         # For this demo, we assume the runner updates next_run_at immediately or we launch tasks

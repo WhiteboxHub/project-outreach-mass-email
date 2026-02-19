@@ -93,8 +93,8 @@ class ScheduleRunner:
                     delta = timedelta(days=30) # approximation, better logic would be calendrical
                 
                 # ADVANCE TO FUTURE: To prevent catch-up loops, move to the next valid slot >= NOW
-                now = datetime.now()
-                while current_next_dt <= now:
+                now_utc = utcnow().replace(tzinfo=None) 
+                while current_next_dt <= now_utc:
                     current_next_dt += delta
                 
                 updates["next_run_at"] = current_next_dt.strftime('%Y-%m-%d %H:%M:%S')

@@ -55,12 +55,17 @@ class SMTPSender(BaseSender):
             msg = MIMEMultipart("alternative")
             msg["Subject"] = subject
             
+            # Strip trailing/leading spaces from email addresses
+            # A trailing space (e.g., "email@...com ") can cause Gmail to silently drop the message.
+            clean_from_email = from_email.strip() if from_email else ""
+            clean_to_email = to_email.strip() if to_email else ""
+
             if from_name:
-                msg["From"] = f"{from_name} <{from_email}>"
+                msg["From"] = f"{from_name.strip()} <{clean_from_email}>"
             else:
-                msg["From"] = from_email
+                msg["From"] = clean_from_email
                 
-            msg["To"] = to_email
+            msg["To"] = clean_to_email
             if reply_to:
                 msg["Reply-To"] = reply_to
             
@@ -68,9 +73,8 @@ class SMTPSender(BaseSender):
                 for key, value in headers.items():
                     msg.add_header(key, value)
 
-            # Deliverability Headers
-            msg.add_header("X-Priority", "3")
-            msg.add_header("X-Mailer", "WBL-Outreach-v1")
+            # We remove explicit X-Mailer and X-Priority headers
+            # because they commonly trigger spam filters on standard SMTP accounts.
 
             if text_body:
                 msg.attach(MIMEText(text_body, "plain"))
@@ -81,7 +85,7 @@ class SMTPSender(BaseSender):
                 if self.use_tls:
                     server.starttls()
                 server.login(self.username, self.password)
-                server.sendmail(from_email, [to_email], msg.as_string())
+                server.sendmail(clean_from_email, [clean_to_email], msg.as_string())
             
             return True
         except Exception as e:

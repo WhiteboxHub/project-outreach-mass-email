@@ -17,6 +17,7 @@ from .engine_builder import EngineBuilder
 from models.execution_log import LogStatus
 from utils.rate_limiter import TokenBucketRateLimiter
 from utils.retry import RetryManager
+from utils.report_mailer import send_run_report
 
 logger = logging.getLogger("outreach_service")
 
@@ -67,13 +68,17 @@ class WorkflowExecutor:
              params_config = {}
         
         # Create execution log - STATE: QUEUED -> INITIALIZING
+        # Only persist safe, minimal fields — never store passwords or tokens in the DB
+        _SAFE_PARAM_KEYS = {"candidate_id", "email", "trigger_type"}
+        safe_params = {k: v for k, v in execution_context.items() if k in _SAFE_PARAM_KEYS}
+
         log_entry = {
             "workflow_id": workflow_id,
             "schedule_id": schedule_id,
             "run_id": run_id,
             "status": "queued",
             "started_at": start_time.isoformat(),
-            "parameters_used": execution_context # Pass as dict, backend handles JSON
+            "parameters_used": safe_params
         }
         log_id = self.log_client.create(log_entry)
         
@@ -154,13 +159,18 @@ class WorkflowExecutor:
             if not recipient_sql:
                  raise ValueError("Workflow missing recipient_list_sql.")
             
-            recipients = self.recipient_resolver.resolve(workflow_id, recipient_sql, execution_context)
-            logger.info(f"Resolved {len(recipients)} recipients.")
+            recipients, invalid_skipped_emails = self.recipient_resolver.resolve(workflow_id, recipient_sql, execution_context)
+            logger.info(f"Resolved {len(recipients)} valid recipients. {len(invalid_skipped_emails)} skipped (invalid email).")
 
-            if not recipients:
+            if not recipients and not invalid_skipped_emails:
                  logger.info("No recipients found. Workflow completes successfully (nothing to do).")
                  self._update_status(log_id, "success", processed=0, failed=0)
                  return {"status": "success", "processed": 0, "failed": 0}
+
+            if not recipients:
+                 logger.warning(f"All {len(invalid_skipped_emails)} recipients were invalid. Marking as failed.")
+                 self._update_status(log_id, "failed", processed=0, failed=0)
+                 return {"status": "failed", "error": f"All {len(invalid_skipped_emails)} recipients had invalid emails"}
 
             # 5. Build Engine & Rate Limiter
             sender = EngineBuilder.build(engine_config)
@@ -172,12 +182,24 @@ class WorkflowExecutor:
             semaphore = asyncio.Semaphore(batch_size)
 
             # 6. Execute Sending
+            total_to_send = len(recipients)
+            total_skipped = len(invalid_skipped_emails)
             success_count = 0
             failed_count = 0
+            completed_count = 0
             recipient_results = []
-            
-            from utils.retry import RetryManager 
-            
+
+            # Pre-populate skipped (invalid) entries into results so report shows them
+            for bad_email in invalid_skipped_emails:
+                recipient_results.append({"email": bad_email, "status": "skipped", "reason": "invalid email (syntax/MX)"})
+
+            logger.info(f"")
+            logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            logger.info(f"  📨 SENDING  {total_to_send} emails  |  {total_skipped} skipped (invalid)")
+            logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            logger.info(f"")
+
+
             @RetryManager.with_retry(max_attempts=3, base_delay=1.0)
             async def _send_with_retry(recipient, context, subject, html_body, text_body, reply_to):
                  return await sender.send(
@@ -191,7 +213,7 @@ class WorkflowExecutor:
                 )
 
             async def process_recipient(recipient):
-                nonlocal success_count, failed_count
+                nonlocal success_count, failed_count, completed_count
                 
                 if datetime.now() > deadline:
                     return {"email": recipient.email, "status": "timed_out"}
@@ -213,17 +235,25 @@ class WorkflowExecutor:
                         html_body = self.template_renderer.render(template["content_html"], context)
                         text_body = self.template_renderer.render(template["content_text"], context) if template.get("content_text") else ""
 
-                        logger.info(f"   [SMTP] Sending email to {recipient.email}...")
+                        logger.info(f"  [{completed_count + 1}/{total_to_send}] Sending → {recipient.email}")
                         sent = await _send_with_retry(recipient, context, subject, html_body, text_body, current_reply_to)
-                        
+
                         # Add a small delay to avoid SMTP throttling
                         await asyncio.sleep(2.0)
 
+                        completed_count += 1
                         if sent:
-                            logger.info(f"   [SMTP] Success: {recipient.email}")
                             success_count += 1
+                            logger.info(
+                                f"  [{completed_count}/{total_to_send}] ✔  {recipient.email}  "
+                                f"(sent {success_count} | failed {failed_count} | remaining {total_to_send - completed_count})"
+                            )
                         else:
                             failed_count += 1
+                            logger.warning(
+                                f"  [{completed_count}/{total_to_send}] ✗  {recipient.email}  "
+                                f"(sent {success_count} | failed {failed_count} | remaining {total_to_send - completed_count})"
+                            )
 
                         # Periodic progress update to the DB (every 5 recipients)
                         if (success_count + failed_count) % 5 == 0:
@@ -253,11 +283,15 @@ class WorkflowExecutor:
 
             tasks = [process_recipient(r) for r in recipients]
             if tasks:
-                logger.info(f"Starting async sending for {len(tasks)} recipients...")
                 results = await asyncio.gather(*tasks)
-                recipient_results = results
-            
-            logger.info(f"Workflow execution finished. Success: {success_count}, Failed: {failed_count}")
+                recipient_results = list(results) + recipient_results  # valid sends first, then skipped
+
+            logger.info(f"")
+            logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            logger.info(f"  ✅ DONE  ✔ {success_count} sent  |  ✗ {failed_count} failed  |  ⊘ {total_skipped} skipped")
+            logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            logger.info(f"")
+
             
             if datetime.now() > deadline:
                  self._update_status(log_id, "timed_out", error="Execution timed out during sending")
@@ -281,16 +315,35 @@ class WorkflowExecutor:
                     logger.error(f"Failed to execute reset SQL via API: {e}")
 
             # 8. Update Log
+            # execution_metadata is intentionally NOT stored in the DB to keep
+            # the logs table clean — full details are sent via the report email instead.
+            finished_at = datetime.now()
             try:
                 self.log_client.update(log_id, {
                     "status": final_status,
                     "records_processed": success_count,
-                    "records_failed": failed_count,
-                    "execution_metadata": recipient_results,
-                    "finished_at": datetime.now().isoformat()
+                    "records_failed": failed_count + len(invalid_skipped_emails),
+                    "finished_at": finished_at.isoformat()
                 })
             except Exception as e:
                 logger.error(f"Failed to update final log status: {e}")
+
+            # 9. Send run summary report email
+            try:
+                send_run_report(
+                    workflow_name=workflow.get("name", f"Workflow #{workflow_id}"),
+                    run_id=run_id,
+                    final_status=final_status,
+                    success_count=success_count,
+                    failed_count=failed_count,
+                    started_at=start_time,
+                    finished_at=finished_at,
+                    recipient_results=recipient_results,
+                    execution_context=execution_context,
+                    schedule_id=schedule_id,
+                )
+            except Exception as e:
+                logger.error(f"Failed to send run report email: {e}")
 
             return {
                 "status": "success",
