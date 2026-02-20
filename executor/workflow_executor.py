@@ -195,7 +195,7 @@ class WorkflowExecutor:
 
             logger.info(f"")
             logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            logger.info(f"  📨 SENDING  {total_to_send} emails  |  {total_skipped} skipped (invalid)")
+            logger.info(f"   SENDING  {total_to_send} emails  |  {total_skipped} skipped (invalid)")
             logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             logger.info(f"")
 
@@ -224,8 +224,8 @@ class WorkflowExecutor:
                         context = recipient.metadata.copy()
                         context.update(execution_context)
                         
-                        context["recipient_email"] = recipient.email
-                        context["recipient_name"] = recipient.name
+                        # No name used — greeting will be just "Hi" or "Hello"
+                        context["recipient_name"] = ""
                         context["unsubscribe_link"] = f"http://unsubscribe.mock/{recipient.email}" 
 
                         # Determine reply-to for this specific send
@@ -288,7 +288,7 @@ class WorkflowExecutor:
 
             logger.info(f"")
             logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            logger.info(f"  ✅ DONE  ✔ {success_count} sent  |  ✗ {failed_count} failed  |  ⊘ {total_skipped} skipped")
+            logger.info(f"   DONE  ✔ {success_count} sent  |  ✗ {failed_count} failed  |  ⊘ {total_skipped} skipped")
             logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             logger.info(f"")
 
