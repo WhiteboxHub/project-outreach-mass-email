@@ -67,9 +67,10 @@ async def test_workflow_executor_retry_logic(
         "engine_type": "SMTP", "from_email": "test@test.com", 
         "rate_limit_per_minute": 600, "status": "active"
     }
-    MockRecipientResolver.return_value.resolve.return_value = [
-        Recipient(email="r1@test.com", name="R1", metadata={})
-    ]
+    MockRecipientResolver.return_value.resolve.return_value = (
+        [Recipient(email="r1@test.com", name="R1", metadata={})],
+        []
+    )
 
     # Mock Sender with transient failure then success
     mock_sender = MockEngineBuilder.build.return_value
@@ -106,10 +107,10 @@ async def test_workflow_executor_template_fail(
     }
     
     MockEngineClient.return_value.get.return_value = {"engine_type": "SMTP", "from_email": "test@test.com", "status": "active"}
-    
-    MockRecipientResolver.return_value.resolve.return_value = [
-        Recipient(email="r1@test.com", name="R1", metadata={})
-    ]
+    MockRecipientResolver.return_value.resolve.return_value = (
+        [Recipient(email="r1@test.com", name="R1", metadata={})],
+        []
+    )
 
     # Execute
     executor = WorkflowExecutor()

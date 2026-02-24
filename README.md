@@ -83,7 +83,14 @@ Before sending real emails, you can simulate a run. This fetches today's recipie
 python dry_run_validation.py
 ```
 
-### 2. Start the API Server & Background Scheduler
+### 2. Run a One-Off Execution (`run_once.py`)
+If you want to manually trigger the automated outreach schedule without standing up the full API server, you can use the `run_once.py` script. This script executes `ScheduleRunner`, checks if the designated schedule (e.g., Schedule ID 1) is due, runs the corresponding workflow, and automatically advances the "Next Run At" date in the database.
+
+```bash
+python run_once.py
+```
+
+### 3. Start the API Server & Background Scheduler
 Start the FastAPI server (which also boots up the background polling scheduler to execute scheduled outreach runs).
 
 ```bash

@@ -112,7 +112,11 @@ class WorkflowExecutor:
             use_candidate_smtp = params_config.get("engine") == "candidate_smtp"
             
             if use_candidate_smtp:
+                # Backend might store credentials nested or flat in run_parameters
                 cand_data = execution_context.get("candidate_credentials")
+                if not cand_data and "email" in execution_context:
+                    cand_data = execution_context
+                    
                 if not cand_data:
                     raise ValueError("No active marketing record credentials found/cached for candidate.")
                 
@@ -226,6 +230,10 @@ class WorkflowExecutor:
                         
                         # No name used — greeting will be just "Hi" or "Hello"
                         context["recipient_name"] = ""
+                        context["name"] = ""
+                        context["contact_name"] = ""
+                        context["first_name"] = ""
+                        context["last_name"] = ""
                         context["unsubscribe_link"] = f"http://unsubscribe.mock/{recipient.email}" 
 
                         # Determine reply-to for this specific send
@@ -234,6 +242,12 @@ class WorkflowExecutor:
                         subject = self.template_renderer.render(template["subject"], context)
                         html_body = self.template_renderer.render(template["content_html"], context)
                         text_body = self.template_renderer.render(template["content_text"], context) if template.get("content_text") else ""
+
+                        # Clean up any dangling commas or extra spaces left by empty name variables
+                        subject = subject.replace(" ,", ",").replace("  ", " ")
+                        html_body = html_body.replace("Hi ,", "Hi,").replace("Dear ,", "Dear,").replace("Hello ,", "Hello,")
+                        if text_body:
+                            text_body = text_body.replace("Hi ,", "Hi,").replace("Dear ,", "Dear,").replace("Hello ,", "Hello,")
 
                         logger.info(f"  [{completed_count + 1}/{total_to_send}] Sending → {recipient.email}")
                         sent = await _send_with_retry(recipient, context, subject, html_body, text_body, current_reply_to)
