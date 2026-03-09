@@ -234,6 +234,13 @@ class WorkflowExecutor:
                         context["contact_name"] = ""
                         context["first_name"] = ""
                         context["last_name"] = ""
+                        context["full_name"] = ""
+                        
+                        # Convert any None values to empty strings to avoid rendering the word "None"
+                        for k, v in context.items():
+                            if v is None:
+                                context[k] = ""
+                                
                         context["unsubscribe_link"] = f"http://unsubscribe.mock/{recipient.email}" 
 
                         # Determine reply-to for this specific send
@@ -246,8 +253,10 @@ class WorkflowExecutor:
                         # Clean up any dangling commas or extra spaces left by empty name variables
                         subject = subject.replace(" ,", ",").replace("  ", " ")
                         html_body = html_body.replace("Hi ,", "Hi,").replace("Dear ,", "Dear,").replace("Hello ,", "Hello,")
+                        html_body = html_body.replace("Hi None,", "Hi,").replace("Dear None,", "Dear,").replace("Hello None,", "Hello,")
                         if text_body:
                             text_body = text_body.replace("Hi ,", "Hi,").replace("Dear ,", "Dear,").replace("Hello ,", "Hello,")
+                            text_body = text_body.replace("Hi None,", "Hi,").replace("Dear None,", "Dear,").replace("Hello None,", "Hello,")
 
                         logger.info(f"  [{completed_count + 1}/{total_to_send}] Sending → {recipient.email}")
                         sent = await _send_with_retry(recipient, context, subject, html_body, text_body, current_reply_to)
