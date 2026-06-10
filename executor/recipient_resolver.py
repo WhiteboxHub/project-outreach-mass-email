@@ -77,3 +77,51 @@ class RecipientResolver:
             f"✗ {len(invalid_list)} invalid (skipped before sending)"
         )
         return valid_recipients, invalid_list
+
+    def resolve_from_list(
+        self,
+        recipients_list: List[Dict[str, Any]],
+    ) -> Tuple[List[Recipient], List[str]]:
+        """
+        Returns (valid_recipients, invalid_emails) from a pre-defined list.
+        """
+        raw_recipients: List[Recipient] = []
+        for data in recipients_list:
+            email = data.get("recipient_email") or data.get("email") or data.get("vendor_email")
+            name  = data.get("recipient_name") or data.get("name") or data.get("contact_name")
+
+            metadata = data.copy()
+            metadata.pop("recipient_email", None)
+            metadata.pop("email", None)
+            metadata.pop("vendor_email", None)
+
+            if email:
+                raw_recipients.append(Recipient(
+                    email=email.strip().lower(),
+                    name=name,
+                    metadata=metadata,
+                ))
+
+        if not raw_recipients:
+            return [], []
+
+        # Email Validation (Syntax + MX)
+        raw_emails = [r.email for r in raw_recipients]
+        logger.info(f"[Validator] Validating {len(raw_emails)} recipient emails before sending...")
+
+        valid_emails_list, invalid_list = validate_emails(raw_emails, skip_mx=False)
+        valid_set = set(valid_emails_list)
+
+        if invalid_list:
+            logger.warning(
+                f"[Validator] ⚠ Skipping {len(invalid_list)} invalid email(s): "
+                + ", ".join(invalid_list[:10])
+                + (" ..." if len(invalid_list) > 10 else "")
+            )
+
+        valid_recipients = [r for r in raw_recipients if r.email in valid_set]
+        logger.info(
+            f"[Validator] ✔ {len(valid_recipients)} valid | "
+            f"✗ {len(invalid_list)} invalid (skipped before sending)"
+        )
+        return valid_recipients, invalid_list

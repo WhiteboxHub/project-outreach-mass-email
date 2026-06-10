@@ -171,6 +171,8 @@ def _build_html(
     skipped_results: List[Dict],
     error_summary: Optional[str],
     candidate_name: Optional[str],
+    primary_candidate: Optional[str] = None,
+    backup_candidates: Optional[str] = None,
 ) -> str:
     color, emoji, label = _meta(final_status)
     dur  = _dur(t0, t1)
@@ -185,6 +187,16 @@ def _build_html(
         f"<tr><td style='padding:7px 14px;font-size:12px;color:#94a3b8;border-bottom:1px solid #1e293b;'>Sent As</td>"
         f"<td style='padding:7px 14px;font-size:12px;color:#e2e8f0;border-bottom:1px solid #1e293b;'>{candidate_name}</td></tr>"
     ) if candidate_name else ""
+
+    primary_row = (
+        f"<tr><td style='padding:7px 14px;font-size:12px;color:#94a3b8;border-bottom:1px solid #1e293b;'>Primary Candidate</td>"
+        f"<td style='padding:7px 14px;font-size:12px;color:#e2e8f0;border-bottom:1px solid #1e293b;'>{primary_candidate}</td></tr>"
+    ) if primary_candidate else ""
+
+    backups_row = (
+        f"<tr><td style='padding:7px 14px;font-size:12px;color:#94a3b8;border-bottom:1px solid #1e293b;'>Backup Candidates</td>"
+        f"<td style='padding:7px 14px;font-size:12px;color:#e2e8f0;border-bottom:1px solid #1e293b;'>{backup_candidates}</td></tr>"
+    ) if backup_candidates else ""
 
     ok_pct   = _pct(ok,   total)
     fail_pct = _pct(fail, total)
@@ -299,6 +311,8 @@ def _build_html(
               <span style="background:{color};color:#fff;padding:2px 9px;border-radius:9999px;font-size:10px;font-weight:700;">{label}</span>
             </td></tr>
         {candidate_row}
+        {primary_row}
+        {backups_row}
         {sched_row}
         <tr><td style="padding:7px 14px;font-size:12px;color:#94a3b8;border-bottom:1px solid #1e293b;">Started</td>
             <td style="padding:7px 14px;font-size:12px;color:#e2e8f0;border-bottom:1px solid #1e293b;">{t0.strftime('%d %b %Y, %I:%M:%S %p')}</td></tr>
@@ -380,6 +394,8 @@ def send_run_report(
 
     ctx_safe       = _redact(execution_context or {})
     candidate_name = ctx_safe.pop("candidate_name", None)
+    primary_candidate = ctx_safe.pop("primary_candidate", None)
+    backup_candidates = ctx_safe.pop("backup_candidates", None)
 
     _, emoji, label = _meta(final_status)
     dur     = _dur(started_at, finished_at)
@@ -404,6 +420,8 @@ def send_run_report(
         skipped_results=skipped_results,
         error_summary=error_summary,
         candidate_name=candidate_name,
+        primary_candidate=primary_candidate,
+        backup_candidates=backup_candidates,
     )
 
     try:

@@ -31,7 +31,7 @@ class WorkflowExecutor:
         self.recipient_resolver = RecipientResolver()
         self.template_renderer = TemplateRenderer()
 
-    async def execute_workflow(self, workflow_id: int = None, workflow_key: str = None, run_id: str = "manual_run", schedule_id: int = None, timeout_seconds: int = 3600, execution_context: Dict[str, Any] = {}):
+    async def execute_workflow(self, workflow_id: int = None, workflow_key: str = None, run_id: str = "manual_run", schedule_id: int = None, timeout_seconds: int = 3600, execution_context: Dict[str, Any] = {}, override_recipients: List[Dict[str, Any]] = None, candidate_chunks: Optional[Dict[int, List[Dict[str, Any]]]] = None):
         """
         Executes a workflow by ID or Key asynchronously with concurrency and rate limiting.
         """
@@ -78,7 +78,8 @@ class WorkflowExecutor:
             "run_id": run_id,
             "status": "queued",
             "started_at": start_time.isoformat(),
-            "parameters_used": safe_params
+            "parameters_used": safe_params,
+            "email_allocation": execution_context.get("email_allocation") if execution_context.get("email_allocation") else None,
         }
         log_id = self.log_client.create(log_entry)
         
@@ -159,22 +160,32 @@ class WorkflowExecutor:
                  raise ValueError("Workflow missing email_template_id.")
 
             # 4. Resolve Recipients
-            recipient_sql = workflow.get("recipient_list_sql")
-            if not recipient_sql:
-                 raise ValueError("Workflow missing recipient_list_sql.")
-            
-            recipients, invalid_skipped_emails = self.recipient_resolver.resolve(workflow_id, recipient_sql, execution_context)
-            logger.info(f"Resolved {len(recipients)} valid recipients. {len(invalid_skipped_emails)} skipped (invalid email).")
+            all_recipients = []
+            all_invalid = []
+            if override_recipients:
+                all_recipients, all_invalid = self.recipient_resolver.resolve_from_list(override_recipients)
+            elif candidate_chunks:
+                for cid, chunk in candidate_chunks.items():
+                    recipients, invalid = self.recipient_resolver.resolve_from_list(chunk)
+                    all_recipients.extend(recipients)
+                    all_invalid.extend(invalid)
+            else:
+                recipient_sql = workflow.get("recipient_list_sql")
+                if not recipient_sql:
+                     raise ValueError("Workflow missing recipient_list_sql.")
+                all_recipients, all_invalid = self.recipient_resolver.resolve(workflow_id, recipient_sql, execution_context)
 
-            if not recipients and not invalid_skipped_emails:
+            logger.info(f"Resolved {len(all_recipients)} valid recipients. {len(all_invalid)} skipped (invalid email).")
+
+            if not all_recipients and not all_invalid:
                  logger.info("No recipients found. Workflow completes successfully (nothing to do).")
                  self._update_status(log_id, "success", processed=0, failed=0)
                  return {"status": "success", "processed": 0, "failed": 0}
 
-            if not recipients:
-                 logger.warning(f"All {len(invalid_skipped_emails)} recipients were invalid. Marking as failed.")
+            if not all_recipients:
+                 logger.warning(f"All {len(all_invalid)} recipients were invalid. Marking as failed.")
                  self._update_status(log_id, "failed", processed=0, failed=0)
-                 return {"status": "failed", "error": f"All {len(invalid_skipped_emails)} recipients had invalid emails"}
+                 return {"status": "failed", "error": f"All {len(all_invalid)} recipients had invalid emails"}
 
             # 5. Build Engine & Rate Limiter
             sender = EngineBuilder.build(engine_config)
@@ -186,15 +197,15 @@ class WorkflowExecutor:
             semaphore = asyncio.Semaphore(batch_size)
 
             # 6. Execute Sending
-            total_to_send = len(recipients)
-            total_skipped = len(invalid_skipped_emails)
+            total_to_send = len(all_recipients)
+            total_skipped = len(all_invalid)
             success_count = 0
             failed_count = 0
             completed_count = 0
             recipient_results = []
 
             # Pre-populate skipped (invalid) entries into results so report shows them
-            for bad_email in invalid_skipped_emails:
+            for bad_email in all_invalid:
                 recipient_results.append({"email": bad_email, "status": "skipped", "reason": "invalid email (syntax/MX)"})
 
             logger.info(f"")
@@ -304,7 +315,7 @@ class WorkflowExecutor:
                         failed_count += 1
                         return {"email": recipient.email, "status": "error", "error": str(e)}
 
-            tasks = [process_recipient(r) for r in recipients]
+            tasks = [process_recipient(r) for r in all_recipients]
             if tasks:
                 results = await asyncio.gather(*tasks)
                 recipient_results = list(results) + recipient_results  # valid sends first, then skipped
@@ -322,7 +333,7 @@ class WorkflowExecutor:
 
             # 7. Post Processing / Reset Logic
             final_status = "success" if failed_count == 0 else "partial_success"
-            if failed_count == len(recipients) and len(recipients) > 0:
+            if failed_count == len(all_recipients) and len(all_recipients) > 0:
                 final_status = "failed" 
 
             # Execute Success Reset SQL (e.g., reset run_daily_workflow to 0)
@@ -345,7 +356,7 @@ class WorkflowExecutor:
                 self.log_client.update(log_id, {
                     "status": final_status,
                     "records_processed": success_count,
-                    "records_failed": failed_count + len(invalid_skipped_emails),
+                    "records_failed": failed_count + len(all_invalid),
                     "finished_at": finished_at.isoformat()
                 })
             except Exception as e:
@@ -368,10 +379,20 @@ class WorkflowExecutor:
             except Exception as e:
                 logger.error(f"Failed to send run report email: {e}")
 
+            error_msg = None
+            if final_status == "failed":
+                for r in recipient_results:
+                    if r.get("status") in ("error", "failed") and r.get("error"):
+                        error_msg = r["error"]
+                        break
+                if not error_msg:
+                    error_msg = "All recipients failed to process"
+
             return {
-                "status": "success",
+                "status": final_status,
                 "processed": success_count,
-                "failed": failed_count
+                "failed": failed_count,
+                **({"error": error_msg} if error_msg else {})
             }
 
         except TimeoutError as e:
