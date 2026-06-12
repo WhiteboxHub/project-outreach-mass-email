@@ -49,10 +49,12 @@ async def test_scheduler_loop(MockRunner, MockScheduleClient):
     due_time = (datetime.now() - timedelta(hours=1)).isoformat()
     future_time = (datetime.now() + timedelta(hours=1)).isoformat()
     
-    MockScheduleClient.return_value.list.return_value = [
+    schedules_mock = [
         {"id": 1, "status": "active", "next_run_at": due_time},
         {"id": 2, "status": "active", "next_run_at": future_time}
     ]
+    MockScheduleClient.return_value.list.return_value = schedules_mock
+    MockScheduleClient.return_value.list_due.return_value = schedules_mock
     
     # Mock Runner
     MockRunner.return_value.run_schedule = AsyncMock()
@@ -60,7 +62,15 @@ async def test_scheduler_loop(MockRunner, MockScheduleClient):
     # Run loop for one tick
     await loop._tick()
     
-    # Assert
     # Should run schedule 1 but not 2
     MockRunner.return_value.run_schedule.assert_called_with(1)
     assert MockRunner.return_value.run_schedule.call_count == 1
+
+def test_chunk_emails():
+    runner = ScheduleRunner()
+    emails = [{"email": f"test{i}@example.com"} for i in range(10)]
+    chunks = runner._chunk_emails(emails, primary_id=1, backup_ids=[2, 3], primary_limit=2)
+    assert len(chunks[1]) == 2
+    assert len(chunks[2]) == 4
+    assert len(chunks[3]) == 4
+

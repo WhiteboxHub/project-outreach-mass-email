@@ -1,24 +1,30 @@
 from typing import Any, Dict, List, Optional
 from api_clients.base_client import BaseClient
+import logging
+
+logger = logging.getLogger("outreach_service")
 
 class LogClient(BaseClient):
-    # In-memory storage for logs
-    LOGS = []
-
-    def get(self, resource_id: int) -> Optional[Dict[str, Any]]:
-        return next((item for item in self.LOGS if item.get("id") == resource_id), None)
-
-    def list(self, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-        return self.LOGS
-
-    def create(self, log_entry: Dict[str, Any]) -> Dict[str, Any]:
-        log_entry["id"] = len(self.LOGS) + 1
-        self.LOGS.append(log_entry)
-        return log_entry
     
-    def update(self, log_id: int, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        for log in self.LOGS:
-            if log["id"] == log_id:
-                log.update(updates)
-                return log
-        return None
+    def create(self, data: Dict[str, Any]) -> int:
+        try:
+            # We call the backend orchestrator endpoint
+            resp = self._post("/orchestrator/logs", json=data)
+            if resp and "id" in resp:
+                return resp["id"]
+            return None
+        except Exception as e:
+            logger.error(f"Error creating log via API: {e}")
+            return None
+
+    def update(self, log_id: int, updates: Dict[str, Any]) -> bool:
+        if not log_id:
+            return False
+            
+        try:
+            # We call the backend orchestrator endpoint
+            resp = self._put(f"/orchestrator/logs/{log_id}", json=updates)
+            return resp.get("success", False) if resp else False
+        except Exception as e:
+            logger.error(f"Error updating log {log_id} via API: {e}")
+            return False

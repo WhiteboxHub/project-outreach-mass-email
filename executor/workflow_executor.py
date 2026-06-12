@@ -1,6 +1,7 @@
 import logging
 import traceback
 import asyncio
+import json
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 
@@ -13,10 +14,10 @@ from .recipient_resolver import RecipientResolver
 from .template_renderer import TemplateRenderer
 from .engine_builder import EngineBuilder
 
-from models.execution_log import AutomationWorkflowLog, LogStatus
+from models.execution_log import LogStatus
 from utils.rate_limiter import TokenBucketRateLimiter
-from utils.result_writer import ResultWriter
 from utils.retry import RetryManager
+from utils.report_mailer import send_run_report
 
 logger = logging.getLogger("outreach_service")
 
@@ -30,11 +31,13 @@ class WorkflowExecutor:
         self.recipient_resolver = RecipientResolver()
         self.template_renderer = TemplateRenderer()
 
-    async def execute_workflow(self, workflow_id: int = None, workflow_key: str = None, run_id: str = "manual_run", timeout_seconds: int = 3600):
+    async def execute_workflow(self, workflow_id: int = None, workflow_key: str = None, run_id: str = "manual_run", schedule_id: int = None, timeout_seconds: int = 3600, execution_context: Dict[str, Any] = {}, override_recipients: List[Dict[str, Any]] = None, candidate_chunks: Optional[Dict[int, List[Dict[str, Any]]]] = None):
         """
         Executes a workflow by ID or Key asynchronously with concurrency and rate limiting.
         """
-        logger.info(f"Starting execution for Workflow ID: {workflow_id} / Key: {workflow_key} [RunID: {run_id}]")
+        if execution_context is None:
+            execution_context = {}
+        logger.info(f"Starting execution for Workflow ID: {workflow_id} / Key: {workflow_key} [RunID: {run_id}] Context: {execution_context}")
         
         # Initialize Execution State
         start_time = datetime.now()
@@ -50,119 +53,261 @@ class WorkflowExecutor:
 
         if not workflow:
             logger.error("Workflow not found.")
-            return
+            return {"status": "failed", "error": "Workflow not found"}
 
         workflow_id = workflow["id"]
         
+        # Normalize parameters_config if string
+        params_config = workflow.get("parameters_config")
+        if isinstance(params_config, str):
+             try:
+                 params_config = json.loads(params_config)
+             except:
+                 params_config = {}
+        elif params_config is None:
+             params_config = {}
+        
         # Create execution log - STATE: QUEUED -> INITIALIZING
-        log_entry = AutomationWorkflowLog(
-            workflow_id=workflow_id,
-            run_id=run_id,
-            status=LogStatus.INITIALIZING,
-            started_at=start_time
-        )
-        self.log_client.create(log_entry.model_dump())
+        # Only persist safe, minimal fields — never store passwords or tokens in the DB
+        _SAFE_PARAM_KEYS = {"candidate_id", "email", "trigger_type"}
+        safe_params = {k: v for k, v in execution_context.items() if k in _SAFE_PARAM_KEYS}
+
+        log_entry = {
+            "workflow_id": workflow_id,
+            "schedule_id": schedule_id,
+            "run_id": run_id,
+            "status": "queued",
+            "started_at": start_time.isoformat(),
+            "parameters_used": safe_params,
+            "email_allocation": execution_context.get("email_allocation") if execution_context.get("email_allocation") else None,
+        }
+        log_id = self.log_client.create(log_entry)
+        
+        if not log_id:
+            logger.error("Failed to create log entry.")
+            return {"status": "failed", "error": "Failed to create log entry"}
 
         try:
             # Check Deadline
             if datetime.now() > deadline:
                 raise TimeoutError("Execution timed out before initialization.")
-
-            # 2. Fetch Dependencies
-            template = self.template_client.get(workflow["email_template_id"])
-            engine_config = self.engine_client.get(workflow["delivery_engine_id"])
             
-            if not template:
-                raise ValueError(f"Template {workflow['email_template_id']} not found.")
-            if not engine_config:
-                raise ValueError(f"Engine {workflow['delivery_engine_id']} not found.")
+            self._update_status(log_id, "running")
 
-            # 3. Resolve Recipients - STATE: RESOLVING_RECIPIENTS
-            self._update_status(log_entry.id, LogStatus.RESOLVING_RECIPIENTS)
-            recipients = self.recipient_resolver.resolve(workflow["recipient_list_sql"])
-            logger.info(f"Resolved {len(recipients)} recipients.")
+            # 2. Fetch Candidate Metadata (if present)
+            if "candidate_id" in execution_context:
+                try:
+                    c_id = execution_context["candidate_id"]
+                    c_data = self.engine_client.get_candidate_credentials(c_id)
+                    if c_data:
+                        execution_context["candidate_email"] = c_data.get("email")
+                        execution_context["candidate_name"] = c_data.get("candidate_name") or "Candidate"
+                        execution_context["linkedin_url"] = c_data.get("linkedin_url") or ""
+                        execution_context["candidate_credentials"] = c_data # Store for engine config
+                        logger.info(f"Loaded metadata for Candidate {c_id}: {execution_context['candidate_name']}")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch candidate metadata for ID {execution_context['candidate_id']}: {e}")
 
-            # 5. Validate Template (Pre-check)
-            missing_vars_subject = self.template_renderer.validate(template["subject"], {})
-            # We don't have recipient context yet, so we can only check against global params if any. 
-            # Ideally, we check against a sample recipient or just rely on StrictUndefined during execution.
-            # But the user requested "Validate Parameters Before Rendering".
+            # 3. Determine Engine
+            engine_config = None
+            use_candidate_smtp = params_config.get("engine") == "candidate_smtp"
             
-            # Since context is dynamic per recipient, we'll validate inside the loop or just rely on StrictUndefined to fail individually.
-            # However, prompt said "fail early". 
-            # Let's inspect variables. If they are all recipient metadata keys, we can warn if metadata is empty.
-            
-            # Better approach: Check if we have *any* recipients. If so, validate the first one as a sample.
-            if recipients:
-                sample_context = recipients[0].metadata.copy()
-                sample_context["recipient_email"] = recipients[0].email
-                sample_context["recipient_name"] = recipients[0].name
-                sample_context["unsubscribe_link"] = "http://mock"
+            if use_candidate_smtp:
+                # Backend might store credentials nested or flat in run_parameters
+                cand_data = execution_context.get("candidate_credentials")
+                if not cand_data and "email" in execution_context:
+                    cand_data = execution_context
+                    
+                if not cand_data:
+                    raise ValueError("No active marketing record credentials found/cached for candidate.")
                 
-                missing = self.template_renderer.validate(template["content_html"], sample_context)
-                if missing:
-                     raise ValueError(f"Template validation failed. Missing variables for sample recipient: {missing}")
+                # Map to Engine Config
+                engine_config = {
+                    "engine_type": "smtp",
+                    "host": "smtp.gmail.com", 
+                    "port": 587,
+                    "username": cand_data.get("email"),
+                    "password": cand_data.get("imap_password") or cand_data.get("password"),
+                    "from_email": cand_data.get("email"),
+                    "from_name": execution_context.get("candidate_name"),
+                    "rate_limit_per_minute": 15,
+                    "batch_size": 1
+                }
+                
+                # Simple host detection
+                email_addr = cand_data.get("email", "").lower()
+                if "outlook" in email_addr or "hotmail" in email_addr:
+                    engine_config["host"] = "smtp-mail.outlook.com"
+                elif "yahoo" in email_addr:
+                    engine_config["host"] = "smtp.mail.yahoo.com"
+                else:
+                    engine_config["host"] = "smtp.gmail.com"
 
-            # 6. Build Engine & Rate Limiter
+            else:
+                # Use standard Delivery Engine
+                if workflow.get("delivery_engine_id"):
+                    engine_config = self.engine_client.get(workflow["delivery_engine_id"])
+                
+            if not engine_config:
+                raise ValueError("No valid engine configuration found.")
+
+            # 3. Fetch Template
+            if workflow.get("email_template_id"):
+                template = self.template_client.get(workflow["email_template_id"])
+                if not template:
+                    raise ValueError(f"Template {workflow['email_template_id']} not found.")
+            else:
+                 raise ValueError("Workflow missing email_template_id.")
+
+            # 4. Resolve Recipients
+            all_recipients = []
+            all_invalid = []
+            if override_recipients:
+                all_recipients, all_invalid = self.recipient_resolver.resolve_from_list(override_recipients)
+            elif candidate_chunks:
+                for cid, chunk in candidate_chunks.items():
+                    recipients, invalid = self.recipient_resolver.resolve_from_list(chunk)
+                    all_recipients.extend(recipients)
+                    all_invalid.extend(invalid)
+            else:
+                recipient_sql = workflow.get("recipient_list_sql")
+                if not recipient_sql:
+                     raise ValueError("Workflow missing recipient_list_sql.")
+                all_recipients, all_invalid = self.recipient_resolver.resolve(workflow_id, recipient_sql, execution_context)
+
+            logger.info(f"Resolved {len(all_recipients)} valid recipients. {len(all_invalid)} skipped (invalid email).")
+
+            if not all_recipients and not all_invalid:
+                 logger.info("No recipients found. Workflow completes successfully (nothing to do).")
+                 self._update_status(log_id, "success", processed=0, failed=0)
+                 return {"status": "success", "processed": 0, "failed": 0}
+
+            if not all_recipients:
+                 logger.warning(f"All {len(all_invalid)} recipients were invalid. Marking as failed.")
+                 self._update_status(log_id, "failed", processed=0, failed=0)
+                 return {"status": "failed", "error": f"All {len(all_invalid)} recipients had invalid emails"}
+
+            # 5. Build Engine & Rate Limiter
             sender = EngineBuilder.build(engine_config)
             
             rate_limit = engine_config.get("rate_limit_per_minute", 60)
             rate_limiter = TokenBucketRateLimiter(rate_limit_per_minute=rate_limit)
             
-            # Concurrency Control
             batch_size = engine_config.get("batch_size", 10)
             semaphore = asyncio.Semaphore(batch_size)
 
-            # 5. Execute - STATE: SENDING
-            self._update_status(log_entry.id, LogStatus.SENDING)
-            
+            # 6. Execute Sending
+            total_to_send = len(all_recipients)
+            total_skipped = len(all_invalid)
             success_count = 0
             failed_count = 0
+            completed_count = 0
             recipient_results = []
-            
+
+            # Pre-populate skipped (invalid) entries into results so report shows them
+            for bad_email in all_invalid:
+                recipient_results.append({"email": bad_email, "status": "skipped", "reason": "invalid email (syntax/MX)"})
+
+            logger.info(f"")
+            logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            logger.info(f"   SENDING  {total_to_send} emails  |  {total_skipped} skipped (invalid)")
+            logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            logger.info(f"")
+
+
             @RetryManager.with_retry(max_attempts=3, base_delay=1.0)
-            async def _send_with_retry(recipient, context, subject, html_body, text_body):
-                 # Inner function that manages the actual sending and can be retried
+            async def _send_with_retry(recipient, context, subject, html_body, text_body, reply_to):
                  return await sender.send(
                     from_email=engine_config["from_email"],
                     to_email=recipient.email,
                     subject=subject,
                     html_body=html_body,
                     text_body=text_body,
-                    from_name=engine_config.get("from_name")
+                    from_name=engine_config.get("from_name"),
+                    reply_to=reply_to
                 )
 
             async def process_recipient(recipient):
-                nonlocal success_count, failed_count
+                nonlocal success_count, failed_count, completed_count
                 
-                # Check Deadline inside loop
                 if datetime.now() > deadline:
                     return {"email": recipient.email, "status": "timed_out"}
 
                 async with semaphore:
-                    # Acquire Rate Limit Token
                     await rate_limiter.acquire()
-                    
                     try:
-                        # Prepare Context
                         context = recipient.metadata.copy()
-                        context["recipient_email"] = recipient.email
-                        context["recipient_name"] = recipient.name
-                        context["unsubscribe_link"] = f"http://unsubscribe.mock/{recipient.email}"
+                        context.update(execution_context)
+                        
+                        # No name used — greeting will be just "Hi" or "Hello"
+                        context["recipient_name"] = ""
+                        context["name"] = ""
+                        context["contact_name"] = ""
+                        context["first_name"] = ""
+                        context["last_name"] = ""
+                        context["full_name"] = ""
+                        
+                        # Convert any None values to empty strings to avoid rendering the word "None"
+                        for k, v in context.items():
+                            if v is None:
+                                context[k] = ""
+                                
+                        context["unsubscribe_link"] = f"http://unsubscribe.mock/{recipient.email}" 
 
-                        # Render (CPU bound, strictly speaking should await in threadpool if heavy)
+                        # Determine reply-to for this specific send
+                        current_reply_to = context.get("candidate_email") or context.get("reply_to") or engine_config.get("from_email")
+
                         subject = self.template_renderer.render(template["subject"], context)
                         html_body = self.template_renderer.render(template["content_html"], context)
                         text_body = self.template_renderer.render(template["content_text"], context) if template.get("content_text") else ""
 
-                        # Send with Retry
-                        sent = await _send_with_retry(recipient, context, subject, html_body, text_body)
+                        # Clean up any dangling commas or extra spaces left by empty name variables
+                        subject = subject.replace(" ,", ",").replace("  ", " ")
+                        html_body = html_body.replace("Hi ,", "Hi,").replace("Dear ,", "Dear,").replace("Hello ,", "Hello,")
+                        html_body = html_body.replace("Hi None,", "Hi,").replace("Dear None,", "Dear,").replace("Hello None,", "Hello,")
+                        if text_body:
+                            text_body = text_body.replace("Hi ,", "Hi,").replace("Dear ,", "Dear,").replace("Hello ,", "Hello,")
+                            text_body = text_body.replace("Hi None,", "Hi,").replace("Dear None,", "Dear,").replace("Hello None,", "Hello,")
 
+                        logger.info(f"  [{completed_count + 1}/{total_to_send}] Sending → {recipient.email}")
+                        sent = await _send_with_retry(recipient, context, subject, html_body, text_body, current_reply_to)
+
+                        # Add a small delay to avoid SMTP throttling
+                        await asyncio.sleep(2.0)
+
+                        completed_count += 1
                         if sent:
                             success_count += 1
-                            return {"email": recipient.email, "status": "success"}
+                            logger.info(
+                                f"  [{completed_count}/{total_to_send}] ✔  {recipient.email}  "
+                                f"(sent {success_count} | failed {failed_count} | remaining {total_to_send - completed_count})"
+                            )
                         else:
                             failed_count += 1
+                            logger.warning(
+                                f"  [{completed_count}/{total_to_send}] ✗  {recipient.email}  "
+                                f"(sent {success_count} | failed {failed_count} | remaining {total_to_send - completed_count})"
+                            )
+
+                        # Periodic progress update to the DB (every 5 recipients)
+                        if (success_count + failed_count) % 5 == 0:
+                            try:
+                                self._update_status(log_id, "running", processed=success_count, failed=failed_count)
+                            except:
+                                pass
+
+                        if sent:
+                            # Execute per-recipient update SQL if configured
+                            recipient_update_sql = params_config.get("recipient_update_sql")
+                            if recipient_update_sql:
+                                try:
+                                    # We use the recipient's metadata as parameters for the update
+                                    self.workflow_client.execute_reset_sql(workflow_id, recipient_update_sql, context)
+                                except Exception as e:
+                                    logger.warning(f"Failed to execute per-recipient update SQL for {recipient.email}: {e}")
+                            
+                            return {"email": recipient.email, "status": "success"}
+                        else:
                             return {"email": recipient.email, "status": "failed"}
 
                     except Exception as e:
@@ -170,71 +315,131 @@ class WorkflowExecutor:
                         failed_count += 1
                         return {"email": recipient.email, "status": "error", "error": str(e)}
 
-            # Run concurrently
-            tasks = [process_recipient(r) for r in recipients]
+            tasks = [process_recipient(r) for r in all_recipients]
             if tasks:
                 results = await asyncio.gather(*tasks)
-                recipient_results = results
+                recipient_results = list(results) + recipient_results  # valid sends first, then skipped
+
+            logger.info(f"")
+            logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            logger.info(f"   DONE  ✔ {success_count} sent  |  ✗ {failed_count} failed  |  ⊘ {total_skipped} skipped")
+            logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            logger.info(f"")
+
             
-            # Check if we timed out during processing
             if datetime.now() > deadline:
-                self._update_status(log_entry.id, LogStatus.TIMED_OUT)
-                raise TimeoutError("Execution timed out during sending.")
+                 self._update_status(log_id, "timed_out", error="Execution timed out during sending")
+                 raise TimeoutError("Execution timed out during sending.")
 
-            # 6. Post Processing - STATE: POST_PROCESSING
-            self._update_status(log_entry.id, LogStatus.POST_PROCESSING)
+            # 7. Post Processing / Reset Logic
+            final_status = "success" if failed_count == 0 else "partial_success"
+            if failed_count == len(all_recipients) and len(all_recipients) > 0:
+                final_status = "failed" 
 
-            # 7. Update Log - STATE: COMPLETED / PARTIAL_SUCCESS
-            final_status = LogStatus.COMPLETED if failed_count == 0 else LogStatus.COMPLETED # Simplified for now, or use PARTIAL_SUCCESS logic
-            # Note: User requested specific states. Let's use COMPLETED for success.
-            # If there are failures, it's still "Completed" but with errors, unless it's a total failure.
-            
-            self.log_client.update(log_entry.id, {
-                "status": final_status,
-                "records_processed": success_count,
-                "records_failed": failed_count,
-                "finished_at": datetime.now()
-            })
-            
-            # 8. Save Detailed Result
-            result_writer = ResultWriter()
-            detailed_result = {
-                "run_id": run_id,
-                "workflow_id": workflow_id,
-                "execution_summary": {
-                    "started_at": start_time,
-                    "finished_at": datetime.now(),
-                    "total_recipients": len(recipients),
-                    "success_count": success_count,
-                    "failed_count": failed_count
-                },
-                "recipient_results": recipient_results
-            }
-            result_writer.save_result(run_id, detailed_result)
+            # Execute Success Reset SQL (e.g., reset run_daily_workflow to 0)
+            # We do this if success_count > 0 OR if we reached the end of the batch
+            # to ensure the candidate doesn't get stuck in "daily run" mode.
+            reset_sql = params_config.get("success_reset_sql")
+            if reset_sql and (success_count > 0 or failed_count > 0): 
+                try:
+                    logger.info(f"Executing success reset SQL for workflow {workflow_id}...")
+                    self.workflow_client.execute_reset_sql(workflow_id, reset_sql, execution_context)
+                    logger.info("Successfully reset automation flags (run_daily_workflow etc).")
+                except Exception as e:
+                    logger.error(f"Failed to execute reset SQL via API: {e}")
 
-            logger.info(f"Execution complete. Success: {success_count}, Failed: {failed_count}")
+            # 8. Update Log
+            # execution_metadata is intentionally NOT stored in the DB to keep
+            # the logs table clean — full details are sent via the report email instead.
+            finished_at = datetime.now()
+            try:
+                self.log_client.update(log_id, {
+                    "status": final_status,
+                    "records_processed": success_count,
+                    "records_failed": failed_count + len(all_invalid),
+                    "finished_at": finished_at.isoformat()
+                })
+            except Exception as e:
+                logger.error(f"Failed to update final log status: {e}")
+
+            # 9. Send run summary report email
+            try:
+                send_run_report(
+                    workflow_name=workflow.get("name", f"Workflow #{workflow_id}"),
+                    run_id=run_id,
+                    final_status=final_status,
+                    success_count=success_count,
+                    failed_count=failed_count,
+                    started_at=start_time,
+                    finished_at=finished_at,
+                    recipient_results=recipient_results,
+                    execution_context=execution_context,
+                    schedule_id=schedule_id,
+                )
+            except Exception as e:
+                logger.error(f"Failed to send run report email: {e}")
+
+            error_msg = None
+            if final_status == "failed":
+                for r in recipient_results:
+                    if r.get("status") in ("error", "failed") and r.get("error"):
+                        error_msg = r["error"]
+                        break
+                if not error_msg:
+                    error_msg = "All recipients failed to process"
+
             return {
-                "status": "success",
+                "status": final_status,
                 "processed": success_count,
-                "failed": failed_count
+                "failed": failed_count,
+                **({"error": error_msg} if error_msg else {})
             }
 
         except TimeoutError as e:
             logger.error(f"Workflow execution timed out: {e}")
-            self._update_status(log_entry.id, LogStatus.TIMED_OUT, error=str(e))
-            return {"status": "timed_out", "error": str(e)}
+            self._update_status(log_id, "timed_out", error=str(e))
+
+            # Still send the report — emails were already delivered before the timeout fired.
+            # Use whatever counts/results were captured up to the timeout point.
+            try:
+                _locals = locals()
+                _finished_at = datetime.now()
+                send_run_report(
+                    workflow_name=workflow.get("name", f"Workflow #{workflow_id}"),
+                    run_id=run_id,
+                    final_status="timed_out",
+                    success_count=_locals.get("success_count", 0),
+                    failed_count=_locals.get("failed_count", 0),
+                    started_at=start_time,
+                    finished_at=_finished_at,
+                    recipient_results=_locals.get("recipient_results", []),
+                    execution_context=execution_context,
+                    schedule_id=schedule_id,
+                    error_summary=str(e),
+                )
+            except Exception as report_err:
+                logger.error(f"Failed to send timed-out run report: {report_err}")
+
+            return {
+                "status": "timed_out",
+                "error": str(e),
+                "processed": locals().get("success_count", 0),
+            }
 
         except Exception as e:
             logger.error(f"Workflow execution failed: {e}")
             logger.error(traceback.format_exc())
-            self._update_status(log_entry.id, LogStatus.FAILED, error=str(e))
+            self._update_status(log_id, "failed", error=str(e))
             return {"status": "failed", "error": str(e)}
 
-    def _update_status(self, log_id: int, status: LogStatus, error: str = None):
+    def _update_status(self, log_id: int, status: str, error: str = None, processed: int = None, failed: int = None):
         """Helper to update log status"""
         update_data = {"status": status}
-        if error:
-            update_data["error_summary"] = error
-            update_data["finished_at"] = datetime.now()
+        if error is not None:
+            update_data["error_summary"] = str(error)[:250]
+            update_data["finished_at"] = datetime.now().isoformat()
+        
+        if processed is not None: update_data["records_processed"] = processed
+        if failed is not None: update_data["records_failed"] = failed
             
         self.log_client.update(log_id, update_data)

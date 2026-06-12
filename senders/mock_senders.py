@@ -1,36 +1,52 @@
+"""
+senders/mock_senders.py
+────────────────────────
+Stub senders for non-SMTP providers (Mailgun, SendGrid, AWS SES).
+These are placeholders — production traffic uses SMTPSender.
+They log the send attempt but do not actually deliver the email.
+"""
+
 from .base_sender import BaseSender
 from typing import Dict, Any
 import logging
 
 logger = logging.getLogger("outreach_service")
 
-class MockSender(BaseSender):
-    def __init__(self, provider_name: str, config: Dict[str, Any]):
-        self.provider_name = provider_name
+
+class MailgunSender(BaseSender):
+    def __init__(self, config: Dict[str, Any]):
         self.config = config
 
-    async def send(self, from_email, to_email, subject, html_body, text_body=None, from_name=None, reply_to=None, headers=None) -> bool:
-        logger.info(f"[{self.provider_name}] Sending email...")
-        logger.info(f"   From: {from_name} <{from_email}>")
-        logger.info(f"   To: {to_email}")
-        logger.info(f"   Subject: {subject}")
-        # Simulate network latency
-        import asyncio
-        await asyncio.sleep(0.1) 
-        return True
+    async def send(self, from_email, to_email, subject, html_body,
+                   text_body=None, from_name=None, reply_to=None, headers=None) -> bool:
+        logger.warning(
+            f"[Mailgun] Stub sender — not configured for production. "
+            f"To: {to_email}"
+        )
+        return False
 
-class SMTPSender(MockSender):
-    def __init__(self, config):
-        super().__init__("SMTP", config)
 
-class MailgunSender(MockSender):
-    def __init__(self, config):
-        super().__init__("Mailgun", config)
+class SendGridSender(BaseSender):
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
 
-class SendGridSender(MockSender):
-    def __init__(self, config):
-        super().__init__("SendGrid", config)
+    async def send(self, from_email, to_email, subject, html_body,
+                   text_body=None, from_name=None, reply_to=None, headers=None) -> bool:
+        logger.warning(
+            f"[SendGrid] Stub sender — not configured for production. "
+            f"To: {to_email}"
+        )
+        return False
 
-class AWSSESSender(MockSender):
-    def __init__(self, config):
-        super().__init__("AWS_SES", config)
+
+class AWSSESSender(BaseSender):
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+
+    async def send(self, from_email, to_email, subject, html_body,
+                   text_body=None, from_name=None, reply_to=None, headers=None) -> bool:
+        logger.warning(
+            f"[AWS SES] Stub sender — not configured for production. "
+            f"To: {to_email}"
+        )
+        return False

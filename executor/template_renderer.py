@@ -44,4 +44,4 @@ class TemplateRenderer:
             return template.render(**context)
         except Exception as e:
             logger.error(f"Error rendering template: {e}")
-            raise ValueError(f"Template rendering failed: {e}")
+            raise ValueError(f"Template validation failed: {e}")

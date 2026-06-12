@@ -3,6 +3,15 @@ from pydantic import BaseModel
 import logging
 from typing import Optional
 import uuid
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+# Also load backend env for database settings if it exists
+backend_env = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "wbl-backend", ".env"))
+if os.path.exists(backend_env):
+    load_dotenv(backend_env)
+
 
 from executor.workflow_executor import WorkflowExecutor
 from utils.logger import setup_logger
@@ -13,8 +22,6 @@ logger = logging.getLogger("outreach_service")
 
 from scheduler.scheduler_loop import SchedulerLoop
 import asyncio
-
-app = FastAPI(title="Outreach Service", version="1.0.0")
 
 from contextlib import asynccontextmanager
 
