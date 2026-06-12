@@ -398,7 +398,33 @@ class WorkflowExecutor:
         except TimeoutError as e:
             logger.error(f"Workflow execution timed out: {e}")
             self._update_status(log_id, "timed_out", error=str(e))
-            return {"status": "timed_out", "error": str(e)}
+
+            # Still send the report — emails were already delivered before the timeout fired.
+            # Use whatever counts/results were captured up to the timeout point.
+            try:
+                _locals = locals()
+                _finished_at = datetime.now()
+                send_run_report(
+                    workflow_name=workflow.get("name", f"Workflow #{workflow_id}"),
+                    run_id=run_id,
+                    final_status="timed_out",
+                    success_count=_locals.get("success_count", 0),
+                    failed_count=_locals.get("failed_count", 0),
+                    started_at=start_time,
+                    finished_at=_finished_at,
+                    recipient_results=_locals.get("recipient_results", []),
+                    execution_context=execution_context,
+                    schedule_id=schedule_id,
+                    error_summary=str(e),
+                )
+            except Exception as report_err:
+                logger.error(f"Failed to send timed-out run report: {report_err}")
+
+            return {
+                "status": "timed_out",
+                "error": str(e),
+                "processed": locals().get("success_count", 0),
+            }
 
         except Exception as e:
             logger.error(f"Workflow execution failed: {e}")

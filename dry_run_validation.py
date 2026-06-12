@@ -21,7 +21,13 @@ sys.path.insert(0, SCRIPT_DIR)
 os.chdir(SCRIPT_DIR)
 
 from dotenv import load_dotenv
+import os
 load_dotenv()
+# Also load backend env for database settings if it exists
+backend_env = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "wbl-backend", ".env"))
+if os.path.exists(backend_env):
+    load_dotenv(backend_env)
+
 
 import requests, json
 from utils.email_validator_lite import validate_emails

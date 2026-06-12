@@ -125,7 +125,8 @@ class ScheduleRunner:
                             run_id=f"{run_id}_{cid}",
                             schedule_id=schedule_id,
                             execution_context=c_ctx,
-                            override_recipients=chunk
+                            override_recipients=chunk,
+                            timeout_seconds=7200,  # 2 hours — large batches (500+) need more than the 1h default
                         )
                     )
                 
@@ -134,7 +135,8 @@ class ScheduleRunner:
                     results = await asyncio.gather(*tasks)
                     # Update metrics for successful runs
                     for res, (cid, chunk_len) in zip(results, chunk_candidates):
-                        if res and res.get("status") == "success":
+                        if res and res.get("status") in ("success", "partial_success", "timed_out"):
+                            # Also update metrics on timed_out — emails were sent, timeout fired post-send
                             sent_count = res.get("processed", 0)
                             self._update_candidate_metrics(cid, sent_count)
                 
@@ -160,7 +162,8 @@ class ScheduleRunner:
                     workflow_id=workflow_id,
                     run_id=run_id,
                     schedule_id=schedule_id,
-                    execution_context=run_params
+                    execution_context=run_params,
+                    timeout_seconds=7200,  # 2 hours — large batches need more than the 1h default
                 )
                 self._update_schedule_next_run(schedule_id, schedule, success=(result and result.get("status") == "success"))
                 
