@@ -6,6 +6,7 @@ from uuid import uuid4
 from executor.workflow_executor import WorkflowExecutor
 from api_clients.workflow_client import WorkflowClient
 from api_clients.schedule_client import ScheduleClient
+from api_clients.candidate_client import CandidateClient
 from utils.idempotency import IdempotencyKey, IdempotencyChecker
 from utils.time_utils import utcnow
 
@@ -16,7 +17,9 @@ class ScheduleRunner:
         self.workflow_executor = WorkflowExecutor()
         self.workflow_client = WorkflowClient()
         self.schedule_client = ScheduleClient()
+        self.candidate_client = CandidateClient()
         self.idempotency_checker = IdempotencyChecker()
+
 
     async def run_schedule(self, schedule_id: int):
         """
@@ -208,54 +211,24 @@ class ScheduleRunner:
         self.schedule_client.update(schedule_id, updates)
 
     def _update_candidate_metrics(self, candidate_id: int, sent_count: int):
-        import sys
-        import os
-        backend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "wbl-backend"))
-        if backend_path not in sys.path:
-            sys.path.append(backend_path)
-            
-        from fapi.db.database import SessionLocal
-        from fapi.db.models import CandidateMarketingORM
-        
-        db = SessionLocal()
+        """Update candidate metrics via HTTP API call to backend orchestrator."""
         try:
-            marketing = db.query(CandidateMarketingORM).filter(
-                CandidateMarketingORM.candidate_id == candidate_id,
-                CandidateMarketingORM.status == "active"
-            ).first()
-            if marketing:
-                marketing.fcount += 1
-                marketing.total_outreach_count += sent_count
-                
-                # Advance outreach_date to tomorrow
-                marketing.outreach_date = date.today() + timedelta(days=1)
-                
-                # Check if max limit reached
-                if marketing.total_outreach_count >= marketing.max_outreach_limit:
-                    marketing.run_daily_workflow = False
-                    logger.info(f"Candidate {candidate_id} reached max outreach limit ({marketing.max_outreach_limit}). Disabled daily program.")
-                
-                db.commit()
-                logger.info(f"Updated Candidate {candidate_id} metrics: fcount={marketing.fcount}, total_outreach={marketing.total_outreach_count}, next_date={marketing.outreach_date}")
+            success = self.candidate_client.update_candidate_metrics(candidate_id, sent_count)
+            if success:
+                logger.info(f"Successfully updated Candidate {candidate_id} metrics via API.")
+            else:
+                logger.error(f"Failed to update Candidate {candidate_id} metrics via API (candidate not found or inactive).")
         except Exception as e:
-            db.rollback()
-            logger.error(f"Failed to update metrics for candidate {candidate_id}: {e}")
-        finally:
-            db.close()
+            logger.error(f"Error calling metrics update API for candidate {candidate_id}: {e}")
 
     async def _load_candidates(self, schedule_id: int):
-        """Load primary and backup candidates for outreach."""
-        import sys
-        import os
-        backend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "wbl-backend"))
-        if backend_path not in sys.path:
-            sys.path.append(backend_path)
-            
-        from fapi.utils.candidate_utils import get_candidates_for_outreach, get_backup_candidates
-        primary_candidates = get_candidates_for_outreach()
-        primary_ids = [c["id"] for c in primary_candidates]
-        backups = get_backup_candidates(exclude_ids=primary_ids)
-        return primary_candidates + backups
+        """Load primary and backup candidates for outreach via REST API."""
+        try:
+            return self.candidate_client.get_outreach_candidates()
+        except Exception as e:
+            logger.error(f"Failed to load outreach candidates via API: {e}")
+            return []
+
 
     def _pick_primary_and_backups(self, candidates):
         """Separate primary candidate and backup list (max 5 backups)."""
