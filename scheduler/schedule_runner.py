@@ -117,6 +117,7 @@ class ScheduleRunner:
                         c_ctx["candidate_credentials"] = c_creds
                         c_ctx["candidate_name"] = c_creds.get("candidate_name")
                         c_ctx["candidate_email"] = c_creds.get("email")
+                        c_ctx["email"] = c_creds.get("email")  # Set 'email' so log parameters show the correct candidate email
                     except Exception as e:
                         logger.error(f"Failed to fetch credentials for candidate {cid}: {e}")
                         continue

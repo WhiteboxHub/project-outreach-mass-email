@@ -41,6 +41,8 @@ class BaseClient:
             return resp.json()
         except Exception as e:
             logger.error(f"PUT {endpoint} failed: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response status: {e.response.status_code}, body: {e.response.text[:500]}")
             return None
 
     def get(self, resource_id: int) -> Optional[Dict[str, Any]]:
