@@ -352,15 +352,23 @@ class WorkflowExecutor:
             # execution_metadata is intentionally NOT stored in the DB to keep
             # the logs table clean — full details are sent via the report email instead.
             finished_at = datetime.now()
-            try:
-                self.log_client.update(log_id, {
-                    "status": final_status,
-                    "records_processed": success_count,
-                    "records_failed": failed_count + len(all_invalid),
-                    "finished_at": finished_at.isoformat()
-                })
-            except Exception as e:
-                logger.error(f"Failed to update final log status: {e}")
+            final_log_update = {
+                "status": final_status,
+                "records_processed": success_count,
+                "records_failed": failed_count + len(all_invalid),
+                "finished_at": finished_at.isoformat()
+            }
+            # Retry up to 3 times — concurrent chunk runs can cause transient API failures
+            for attempt in range(1, 4):
+                try:
+                    updated = self.log_client.update(log_id, final_log_update)
+                    if updated:
+                        break
+                    logger.warning(f"Final log update returned False (attempt {attempt}/3) for log {log_id}")
+                except Exception as e:
+                    logger.error(f"Failed to update final log status (attempt {attempt}/3): {e}")
+                if attempt < 3:
+                    await asyncio.sleep(1.0)
 
             # 9. Send run summary report email
             try:
@@ -442,4 +450,8 @@ class WorkflowExecutor:
         if processed is not None: update_data["records_processed"] = processed
         if failed is not None: update_data["records_failed"] = failed
             
-        self.log_client.update(log_id, update_data)
+        result = self.log_client.update(log_id, update_data)
+        if not result:
+            logger.error(f"⚠ _update_status FAILED for log_id={log_id}, status={status}, data={update_data}")
+        else:
+            logger.info(f"✔ _update_status OK for log_id={log_id} → {status}")

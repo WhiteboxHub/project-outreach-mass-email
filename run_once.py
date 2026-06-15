@@ -9,11 +9,19 @@ os.chdir(SCRIPT_DIR)
 
 from dotenv import load_dotenv
 import os
+import logging
 load_dotenv()
 # Also load backend env for database settings if it exists
 backend_env = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "wbl-backend", ".env"))
 if os.path.exists(backend_env):
     load_dotenv(backend_env)
+
+# Configure logging so we can see all outreach service messages
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S"
+)
 
 
 from executor.workflow_executor import WorkflowExecutor
