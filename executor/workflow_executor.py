@@ -31,7 +31,7 @@ class WorkflowExecutor:
         self.recipient_resolver = RecipientResolver()
         self.template_renderer = TemplateRenderer()
 
-    async def execute_workflow(self, workflow_id: int = None, workflow_key: str = None, run_id: str = "manual_run", schedule_id: int = None, timeout_seconds: int = 3600, execution_context: Dict[str, Any] = {}, override_recipients: List[Dict[str, Any]] = None, candidate_chunks: Optional[Dict[int, List[Dict[str, Any]]]] = None):
+    async def execute_workflow(self, workflow_id: int = None, workflow_key: str = None, run_id: str = "manual_run", schedule_id: int = None, timeout_seconds: int = 3600, execution_context: Dict[str, Any] = {}, override_recipients: List[Dict[str, Any]] = None, candidate_chunks: Optional[Dict[int, List[Dict[str, Any]]]] = None, send_report: bool = True):
         """
         Executes a workflow by ID or Key asynchronously with concurrency and rate limiting.
         """
@@ -371,35 +371,51 @@ class WorkflowExecutor:
                     await asyncio.sleep(1.0)
 
             # 9. Send run summary report email
+            report_data = {
+                "workflow_name": workflow.get("name", f"Workflow #{workflow_id}"),
+                "run_id": run_id,
+                "final_status": final_status,
+                "success_count": success_count,
+                "failed_count": failed_count,
+                "started_at": start_time,
+                "finished_at": finished_at,
+                "recipient_results": recipient_results,
+                "execution_context": execution_context,
+                "schedule_id": schedule_id,
+                "error_summary": None,
+            }
             try:
-                send_run_report(
-                    workflow_name=workflow.get("name", f"Workflow #{workflow_id}"),
-                    run_id=run_id,
-                    final_status=final_status,
-                    success_count=success_count,
-                    failed_count=failed_count,
-                    started_at=start_time,
-                    finished_at=finished_at,
-                    recipient_results=recipient_results,
-                    execution_context=execution_context,
-                    schedule_id=schedule_id,
-                )
-            except Exception as e:
-                logger.error(f"Failed to send run report email: {e}")
-
-            error_msg = None
-            if final_status == "failed":
+                error_msg = None
                 for r in recipient_results:
                     if r.get("status") in ("error", "failed") and r.get("error"):
                         error_msg = r["error"]
                         break
-                if not error_msg:
-                    error_msg = "All recipients failed to process"
+                if not error_msg and failed_count > 0:
+                    error_msg = "Some recipients failed to process"
+                
+                report_data["error_summary"] = error_msg
+                if send_report:
+                    send_run_report(
+                        workflow_name=report_data["workflow_name"],
+                        run_id=report_data["run_id"],
+                        final_status=report_data["final_status"],
+                        success_count=report_data["success_count"],
+                        failed_count=report_data["failed_count"],
+                        started_at=report_data["started_at"],
+                        finished_at=report_data["finished_at"],
+                        recipient_results=report_data["recipient_results"],
+                        execution_context=report_data["execution_context"],
+                        schedule_id=report_data["schedule_id"],
+                        error_summary=report_data["error_summary"],
+                    )
+            except Exception as e:
+                logger.error(f"Failed to send run report email: {e}")
 
             return {
                 "status": final_status,
                 "processed": success_count,
                 "failed": failed_count,
+                "report_data": report_data,
                 **({"error": error_msg} if error_msg else {})
             }
 
@@ -409,36 +425,69 @@ class WorkflowExecutor:
 
             # Still send the report — emails were already delivered before the timeout fired.
             # Use whatever counts/results were captured up to the timeout point.
+            _locals = locals()
+            _finished_at = datetime.now()
+            report_data = {
+                "workflow_name": workflow.get("name", f"Workflow #{workflow_id}") if 'workflow' in _locals and workflow else f"Workflow #{workflow_id}",
+                "run_id": run_id,
+                "final_status": "timed_out",
+                "success_count": _locals.get("success_count", 0),
+                "failed_count": _locals.get("failed_count", 0),
+                "started_at": start_time,
+                "finished_at": _finished_at,
+                "recipient_results": _locals.get("recipient_results", []),
+                "execution_context": execution_context,
+                "schedule_id": schedule_id,
+                "error_summary": str(e),
+            }
             try:
-                _locals = locals()
-                _finished_at = datetime.now()
-                send_run_report(
-                    workflow_name=workflow.get("name", f"Workflow #{workflow_id}"),
-                    run_id=run_id,
-                    final_status="timed_out",
-                    success_count=_locals.get("success_count", 0),
-                    failed_count=_locals.get("failed_count", 0),
-                    started_at=start_time,
-                    finished_at=_finished_at,
-                    recipient_results=_locals.get("recipient_results", []),
-                    execution_context=execution_context,
-                    schedule_id=schedule_id,
-                    error_summary=str(e),
-                )
+                if send_report:
+                    send_run_report(
+                        workflow_name=report_data["workflow_name"],
+                        run_id=report_data["run_id"],
+                        final_status=report_data["final_status"],
+                        success_count=report_data["success_count"],
+                        failed_count=report_data["failed_count"],
+                        started_at=report_data["started_at"],
+                        finished_at=report_data["finished_at"],
+                        recipient_results=report_data["recipient_results"],
+                        execution_context=report_data["execution_context"],
+                        schedule_id=report_data["schedule_id"],
+                        error_summary=report_data["error_summary"],
+                    )
             except Exception as report_err:
                 logger.error(f"Failed to send timed-out run report: {report_err}")
 
             return {
                 "status": "timed_out",
                 "error": str(e),
-                "processed": locals().get("success_count", 0),
+                "processed": _locals.get("success_count", 0),
+                "report_data": report_data,
             }
 
         except Exception as e:
             logger.error(f"Workflow execution failed: {e}")
             logger.error(traceback.format_exc())
             self._update_status(log_id, "failed", error=str(e))
-            return {"status": "failed", "error": str(e)}
+            
+            report_data = {
+                "workflow_name": workflow.get("name", f"Workflow #{workflow_id}") if 'workflow' in locals() and workflow else f"Workflow #{workflow_id}",
+                "run_id": run_id,
+                "final_status": "failed",
+                "success_count": 0,
+                "failed_count": 0,
+                "started_at": start_time,
+                "finished_at": datetime.now(),
+                "recipient_results": [],
+                "execution_context": execution_context,
+                "schedule_id": schedule_id,
+                "error_summary": str(e),
+            }
+            return {
+                "status": "failed",
+                "error": str(e),
+                "report_data": report_data
+            }
 
     def _update_status(self, log_id: int, status: str, error: str = None, processed: int = None, failed: int = None):
         """Helper to update log status"""

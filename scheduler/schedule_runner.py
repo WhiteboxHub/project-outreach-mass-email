@@ -131,6 +131,7 @@ class ScheduleRunner:
                             execution_context=c_ctx,
                             override_recipients=chunk,
                             timeout_seconds=7200,  # 2 hours — large batches (500+) need more than the 1h default
+                            send_report=False,
                         )
                     )
                 
@@ -143,6 +144,19 @@ class ScheduleRunner:
                             # Also update metrics on timed_out — emails were sent, timeout fired post-send
                             sent_count = res.get("processed", 0)
                             self._update_candidate_metrics(cid, sent_count)
+                    
+                    # Send consolidated report email
+                    reports = [res["report_data"] for res in results if res and "report_data" in res]
+                    if reports:
+                        from utils.report_mailer import send_combined_run_report
+                        try:
+                            send_combined_run_report(
+                                workflow_name=workflow.get("name", f"Workflow #{workflow_id}"),
+                                schedule_id=schedule_id,
+                                reports=reports,
+                            )
+                        except Exception as report_err:
+                            logger.error(f"Failed to send consolidated daily run report: {report_err}")
                 
                 primary_sent = 0
                 if 'results' in locals() and results:

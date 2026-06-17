@@ -446,3 +446,464 @@ def send_run_report(
     except Exception as e:
         logger.error(f"Run report email failed: {e}")
         return False
+
+
+def _parse_dt(val) -> Optional[datetime]:
+    if not val:
+        return None
+    if isinstance(val, datetime):
+        return val
+    if isinstance(val, str):
+        try:
+            return datetime.fromisoformat(val)
+        except:
+            pass
+        try:
+            return datetime.strptime(val, "%Y-%m-%d %H:%M:%S.%f")
+        except:
+            pass
+        try:
+            return datetime.strptime(val, "%Y-%m-%d %H:%M:%S")
+        except:
+            pass
+    return None
+
+
+def _fmt_dt(val) -> str:
+    dt = _parse_dt(val)
+    if dt:
+        return dt.strftime('%d %b %Y, %I:%M:%S %p')
+    return str(val) if val else "—"
+
+
+def _build_candidate_section(r: dict) -> str:
+    ctx = r.get("execution_context") or {}
+    ctx_safe = _redact(ctx)
+    candidate_name = ctx_safe.pop("candidate_name", None) or "Candidate"
+    candidate_email = ctx_safe.pop("candidate_email", None) or ""
+    
+    primary_candidate_str = ctx_safe.get("primary_candidate", "")
+    is_primary = False
+    if primary_candidate_str and candidate_name.lower() in primary_candidate_str.lower():
+        is_primary = True
+        
+    role = "Primary Candidate" if is_primary else "Backup Candidate"
+    
+    final_status = r.get("final_status", "unknown")
+    color, emoji, label = _meta(final_status)
+    
+    ok = r.get("success_count", 0)
+    fail = r.get("failed_count", 0)
+    
+    results = r.get("recipient_results") or []
+    skipped_results = [x for x in results if x.get("status") == "skipped"]
+    sent_results = [x for x in results if x.get("status") != "skipped"]
+    
+    skip = len(skipped_results)
+    total = ok + fail + skip
+    
+    t0 = r.get("started_at")
+    t1 = r.get("finished_at")
+    dt0 = _parse_dt(t0)
+    dt1 = _parse_dt(t1)
+    if dt0 and dt1:
+        dur = _dur(dt0, dt1)
+    else:
+        dur = "—"
+    
+    ok_pct   = _pct(ok,   total)
+    fail_pct = _pct(fail, total)
+    skip_pct = _pct(skip, total)
+    bar = _bar_td(ok_pct, "#4ade80") + _bar_td(fail_pct, "#f87171") + _bar_td(skip_pct, "#a78bfa")
+    
+    err_html = ""
+    error_summary = r.get("error_summary")
+    if error_summary:
+        err_html = f"""
+        <div style="background:#1a0808;border:1px solid #7f1d1d;border-radius:10px;padding:14px 16px;margin-bottom:20px;">
+          <p style="margin:0 0 4px;font-size:10px;font-weight:700;color:#f87171;text-transform:uppercase;">⚠ Error</p>
+          <p style="margin:0;font-size:12px;color:#fca5a5;font-family:monospace;">{error_summary}</p>
+        </div>"""
+        
+    sent_html = _sent_table(sent_results)
+    invalid_html = _invalid_table(skipped_results)
+    
+    return f"""
+    <!-- Candidate Block: {candidate_name} -->
+    <div style="border:1px solid #1e293b;border-radius:14px;background:#0f172a;padding:24px;margin-bottom:32px;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-bottom:1px solid #1e293b;padding-bottom:14px;margin-bottom:20px;">
+        <tr>
+          <td>
+            <p style="margin:0;font-size:10px;font-weight:700;color:{color};text-transform:uppercase;letter-spacing:1.5px;">{role}</p>
+            <h2 style="margin:4px 0 0;font-size:18px;font-weight:800;color:#f8fafc;">{candidate_name} <span style="font-size:13px;font-weight:400;color:#64748b;">({candidate_email})</span></h2>
+          </td>
+          <td align="right" valign="middle">
+            <span style="background:{color};color:#fff;padding:4px 12px;border-radius:9999px;font-size:11px;font-weight:700;">{emoji} {label}</span>
+          </td>
+        </tr>
+      </table>
+      
+      <!-- KPI cards -->
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;">
+        <tr>
+          <td width="23%" style="background:#0d2818;border:1px solid #166534;border-radius:12px;padding:12px 6px;text-align:center;">
+            <p style="margin:0;font-size:26px;font-weight:900;color:#4ade80;">{ok}</p>
+            <p style="margin:4px 0 0;font-size:8px;font-weight:700;color:#86efac;text-transform:uppercase;letter-spacing:1px;">✓ Sent</p>
+          </td>
+          <td width="2%"></td>
+          <td width="23%" style="background:#1a0808;border:1px solid #7f1d1d;border-radius:12px;padding:12px 6px;text-align:center;">
+            <p style="margin:0;font-size:26px;font-weight:900;color:#f87171;">{fail}</p>
+            <p style="margin:4px 0 0;font-size:8px;font-weight:700;color:#fca5a5;text-transform:uppercase;letter-spacing:1px;">✗ SMTP Failed</p>
+          </td>
+          <td width="2%"></td>
+          <td width="23%" style="background:#1a0808;border:2px solid #7f1d1d;border-radius:12px;padding:12px 6px;text-align:center;">
+            <p style="margin:0;font-size:26px;font-weight:900;color:#f97316;">{skip}</p>
+            <p style="margin:4px 0 0;font-size:8px;font-weight:700;color:#fdba74;text-transform:uppercase;letter-spacing:1px;">⊘ Invalid Email</p>
+          </td>
+          <td width="2%"></td>
+          <td width="23%" style="background:#0c1a3a;border:1px solid #1e3a8a;border-radius:12px;padding:12px 6px;text-align:center;">
+            <p style="margin:0;font-size:26px;font-weight:900;color:#60a5fa;">{total}</p>
+            <p style="margin:4px 0 0;font-size:8px;font-weight:700;color:#93c5fd;text-transform:uppercase;letter-spacing:1px;">⚡ Fetched</p>
+          </td>
+        </tr>
+      </table>
+
+      <!-- Stats row -->
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;">
+        <tr>
+          <td width="31%" style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:10px 12px;">
+            <p style="margin:0 0 2px;font-size:9px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:1px;">⏱ Duration</p>
+            <p style="margin:0;font-size:15px;font-weight:800;color:#e2e8f0;">{dur}</p>
+          </td>
+          <td width="3%"></td>
+          <td width="31%" style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:10px 12px;">
+            <p style="margin:0 0 2px;font-size:9px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:1px;">📊 Delivery Rate</p>
+            <p style="margin:0;font-size:15px;font-weight:800;color:#e2e8f0;">{_pct(ok, total - skip)}%</p>
+          </td>
+          <td width="3%"></td>
+          <td width="31%" style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:10px 12px;">
+            <p style="margin:0 0 2px;font-size:9px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:1px;">✅ Valid Rate</p>
+            <p style="margin:0;font-size:15px;font-weight:800;color:#e2e8f0;">{_pct(total - skip, total)}%</p>
+          </td>
+        </tr>
+      </table>
+
+      <!-- Progress bar -->
+      <div style="background:#1e293b;border-radius:9999px;height:8px;overflow:hidden;margin-bottom:6px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="height:8px;border-collapse:collapse;">
+          <tr>{bar}</tr>
+        </table>
+      </div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;">
+        <tr>
+          <td style="font-size:9px;color:#4ade80;">■ {ok_pct}% sent</td>
+          <td align="center" style="font-size:9px;color:#f87171;">■ {fail_pct}% failed</td>
+          <td align="right" style="font-size:9px;color:#f97316;">■ {skip_pct}% invalid</td>
+        </tr>
+      </table>
+
+      <!-- Candidate Run Details -->
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border:1px solid #1e293b;border-radius:8px;overflow:hidden;">
+        <tr>
+          <td style="padding:6px 12px;font-size:11px;color:#94a3b8;width:120px;border-bottom:1px solid #1e293b;background:#1e293b;">Run ID</td>
+          <td style="padding:6px 12px;font-size:11px;color:#e2e8f0;border-bottom:1px solid #1e293b;font-family:monospace;background:#1e293b;">{r.get('run_id')}</td>
+        </tr>
+        <tr>
+          <td style="padding:6px 12px;font-size:11px;color:#94a3b8;border-bottom:1px solid #1e293b;">Started At</td>
+          <td style="padding:6px 12px;font-size:11px;color:#e2e8f0;border-bottom:1px solid #1e293b;">{_fmt_dt(t0)}</td>
+        </tr>
+        <tr>
+          <td style="padding:6px 12px;font-size:11px;color:#94a3b8;">Finished At</td>
+          <td style="padding:6px 12px;font-size:11px;color:#e2e8f0;">{_fmt_dt(t1)}</td>
+        </tr>
+      </table>
+
+      {err_html}
+      {invalid_html}
+      {sent_html}
+    </div>
+    """
+
+
+def _build_combined_html(
+    workflow_name: str,
+    schedule_id: Optional[int],
+    reports: List[dict],
+) -> str:
+    total_ok = 0
+    total_fail = 0
+    total_skip = 0
+    
+    for r in reports:
+        total_ok += r.get("success_count", 0)
+        total_fail += r.get("failed_count", 0)
+        results = r.get("recipient_results") or []
+        total_skip += len([x for x in results if x.get("status") == "skipped"])
+        
+    total_fetched = total_ok + total_fail + total_skip
+    
+    start_times = [dt for r in reports if (dt := _parse_dt(r.get("started_at"))) is not None]
+    finish_times = [dt for r in reports if (dt := _parse_dt(r.get("finished_at"))) is not None]
+    
+    global_start = min(start_times) if start_times else datetime.now()
+    global_finish = max(finish_times) if finish_times else datetime.now()
+    global_dur = _dur(global_start, global_finish)
+    
+    statuses = [r.get("final_status", "unknown") for r in reports]
+    if any(s == "timed_out" for s in statuses):
+        global_status = "timed_out"
+    elif all(s == "success" for s in statuses):
+        global_status = "success"
+    elif all(s == "failed" for s in statuses):
+        global_status = "failed"
+    else:
+        global_status = "partial_success"
+        
+    color, emoji, label = _meta(global_status)
+    from datetime import timezone
+    gen = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    
+    primary_candidate = "—"
+    backup_candidates = "—"
+    if reports:
+        ctx = reports[0].get("execution_context") or {}
+        primary_candidate = ctx.get("primary_candidate") or "—"
+        backup_candidates = ctx.get("backup_candidates") or "—"
+        
+    ok_pct   = _pct(total_ok,   total_fetched)
+    fail_pct = _pct(total_fail, total_fetched)
+    skip_pct = _pct(total_skip, total_fetched)
+    bar = _bar_td(ok_pct, "#4ade80") + _bar_td(fail_pct, "#f87171") + _bar_td(skip_pct, "#a78bfa")
+    
+    candidate_sections = ""
+    for r in reports:
+        candidate_sections += _build_candidate_section(r)
+        
+    sched_row = (
+        f"<tr><td style='padding:7px 14px;font-size:12px;color:#94a3b8;border-bottom:1px solid #1e293b;'>Schedule</td>"
+        f"<td style='padding:7px 14px;font-size:12px;color:#e2e8f0;border-bottom:1px solid #1e293b;'>ID #{schedule_id}</td></tr>"
+    ) if schedule_id else ""
+
+    primary_row = (
+        f"<tr><td style='padding:7px 14px;font-size:12px;color:#94a3b8;border-bottom:1px solid #1e293b;'>Primary Candidate</td>"
+        f"<td style='padding:7px 14px;font-size:12px;color:#e2e8f0;border-bottom:1px solid #1e293b;'>{primary_candidate}</td></tr>"
+    ) if primary_candidate else ""
+
+    backups_row = (
+        f"<tr><td style='padding:7px 14px;font-size:12px;color:#94a3b8;border-bottom:1px solid #1e293b;'>Backup Candidates</td>"
+        f"<td style='padding:7px 14px;font-size:12px;color:#e2e8f0;border-bottom:1px solid #1e293b;'>{backup_candidates}</td></tr>"
+    ) if backup_candidates else ""
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>WBL Run Report</title></head>
+<body style="margin:0;padding:0;background:#020617;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#020617;padding:32px 0;">
+<tr><td align="center">
+<table width="620" cellpadding="0" cellspacing="0"
+       style="background:#0f172a;border:1px solid #1e293b;border-radius:16px;overflow:hidden;max-width:620px;">
+
+  <!-- Header -->
+  <tr><td style="background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);padding:32px 32px 24px;">
+    <p style="margin:0 0 4px;font-size:10px;font-weight:700;color:#4ade80;
+              text-transform:uppercase;letter-spacing:2px;">WBL Automation</p>
+    <h1 style="margin:0 0 6px;font-size:22px;font-weight:800;color:#f8fafc;">{emoji} {label}</h1>
+    <p style="margin:0;font-size:14px;color:#94a3b8;">{workflow_name} (Consolidated Report)</p>
+  </td></tr>
+
+  <!-- Body -->
+  <tr><td style="padding:28px 32px;">
+
+    <p style="margin:0 0 28px;font-size:14px;font-weight:700;color:#f8fafc;text-align:center;text-transform:uppercase;letter-spacing:1px;">
+      📊 Executive Summary
+    </p>
+
+    <!-- KPI cards -->
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+      <tr>
+        <td width="23%" style="background:#0d2818;border:1px solid #166534;border-radius:12px;padding:16px 8px;text-align:center;">
+          <p style="margin:0;font-size:34px;font-weight:900;color:#4ade80;">{total_ok}</p>
+          <p style="margin:5px 0 0;font-size:9px;font-weight:700;color:#86efac;text-transform:uppercase;letter-spacing:1px;">✓ Sent</p>
+        </td>
+        <td width="2%"></td>
+        <td width="23%" style="background:#1a0808;border:1px solid #7f1d1d;border-radius:12px;padding:16px 8px;text-align:center;">
+          <p style="margin:0;font-size:34px;font-weight:900;color:#f87171;">{total_fail}</p>
+          <p style="margin:5px 0 0;font-size:9px;font-weight:700;color:#fca5a5;text-transform:uppercase;letter-spacing:1px;">✗ SMTP Failed</p>
+        </td>
+        <td width="2%"></td>
+        <td width="23%" style="background:#1a0808;border:2px solid #7f1d1d;border-radius:12px;padding:16px 8px;text-align:center;">
+          <p style="margin:0;font-size:34px;font-weight:900;color:#f97316;">{total_skip}</p>
+          <p style="margin:5px 0 0;font-size:9px;font-weight:700;color:#fdba74;text-transform:uppercase;letter-spacing:1px;">⊘ Invalid Email</p>
+        </td>
+        <td width="2%"></td>
+        <td width="23%" style="background:#0c1a3a;border:1px solid #1e3a8a;border-radius:12px;padding:16px 8px;text-align:center;">
+          <p style="margin:0;font-size:34px;font-weight:900;color:#60a5fa;">{total_fetched}</p>
+          <p style="margin:5px 0 0;font-size:9px;font-weight:700;color:#93c5fd;text-transform:uppercase;letter-spacing:1px;">⚡ Fetched</p>
+        </td>
+      </tr>
+    </table>
+
+    <!-- Stats row -->
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;">
+      <tr>
+        <td width="31%" style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:13px 16px;">
+          <p style="margin:0 0 2px;font-size:10px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:1px;">⏱ Total Duration</p>
+          <p style="margin:0;font-size:18px;font-weight:800;color:#e2e8f0;">{global_dur}</p>
+        </td>
+        <td width="3%"></td>
+        <td width="31%" style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:13px 16px;">
+          <p style="margin:0 0 2px;font-size:10px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:1px;">📊 Delivery Rate</p>
+          <p style="margin:0;font-size:18px;font-weight:800;color:#e2e8f0;">{_pct(total_ok, total_fetched - total_skip)}% of valid</p>
+        </td>
+        <td width="3%"></td>
+        <td width="31%" style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:13px 16px;">
+          <p style="margin:0 0 2px;font-size:10px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:1px;">✅ Valid Rate</p>
+          <p style="margin:0;font-size:18px;font-weight:800;color:#e2e8f0;">{_pct(total_fetched - total_skip, total_fetched)}% of fetched</p>
+        </td>
+      </tr>
+    </table>
+
+    <!-- Progress bar -->
+    <div style="background:#1e293b;border-radius:9999px;height:10px;overflow:hidden;margin-bottom:6px;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="height:10px;border-collapse:collapse;">
+        <tr>{bar}</tr>
+      </table>
+    </div>
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:28px;">
+      <tr>
+        <td style="font-size:10px;color:#4ade80;">■ {ok_pct}% sent</td>
+        <td align="center" style="font-size:10px;color:#f87171;">■ {fail_pct}% failed</td>
+        <td align="right" style="font-size:10px;color:#f97316;">■ {skip_pct}% invalid (skipped)</td>
+      </tr>
+    </table>
+
+    <!-- Run Details -->
+    <div style="background:#0f172a;border:1px solid #1e293b;border-radius:12px;overflow:hidden;margin-bottom:32px;">
+      <div style="padding:11px 16px;background:#1e293b;">
+        <p style="margin:0;font-size:10px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:1.5px;">📋 Global Run Details</p>
+      </div>
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr><td style="padding:7px 14px;font-size:12px;color:#94a3b8;width:150px;border-bottom:1px solid #1e293b;">Status</td>
+            <td style="padding:7px 14px;border-bottom:1px solid #1e293b;">
+              <span style="background:{color};color:#fff;padding:2px 9px;border-radius:9999px;font-size:10px;font-weight:700;">{label}</span>
+            </td></tr>
+        {primary_row}
+        {backups_row}
+        {sched_row}
+        <tr><td style="padding:7px 14px;font-size:12px;color:#94a3b8;border-bottom:1px solid #1e293b;">Started</td>
+            <td style="padding:7px 14px;font-size:12px;color:#e2e8f0;border-bottom:1px solid #1e293b;">{_fmt_dt(global_start)}</td></tr>
+        <tr><td style="padding:7px 14px;font-size:12px;color:#94a3b8;border-bottom:1px solid #1e293b;">Finished</td>
+            <td style="padding:7px 14px;font-size:12px;color:#e2e8f0;border-bottom:1px solid #1e293b;">{_fmt_dt(global_finish)}</td></tr>
+        <tr><td style="padding:7px 14px;font-size:12px;color:#94a3b8;">Duration</td>
+            <td style="padding:7px 14px;font-size:12px;color:#e2e8f0;font-weight:700;">{global_dur}</td></tr>
+      </table>
+    </div>
+
+    <!-- Candidate Breakdown Header -->
+    <p style="margin:0 0 20px;font-size:14px;font-weight:700;color:#f8fafc;text-align:center;text-transform:uppercase;letter-spacing:1px;border-top:1px solid #1e293b;padding-top:28px;">
+      👥 Candidates Breakdown ({len(reports)})
+    </p>
+
+    <!-- Individual Candidate blocks -->
+    {candidate_sections}
+
+  </td></tr>
+
+  <!-- Footer -->
+  <tr><td style="padding:20px 32px;background:#0a0f1e;text-align:center;border-top:1px solid #1e293b;">
+    <p style="margin:0;font-size:11px;color:#334155;">
+      WBL Outreach Automation &nbsp;·&nbsp; {gen} &nbsp;·&nbsp; Do not reply
+    </p>
+  </td></tr>
+
+</table>
+</td></tr></table>
+</body></html>"""
+
+
+def send_combined_run_report(
+    workflow_name: str,
+    schedule_id: Optional[int],
+    reports: List[dict],
+) -> bool:
+    """
+    Send a beautifully-designed consolidated HTML daily run-summary email to REPORT_EMAIL_TO.
+    Gathers report data from multiple candidates and packages it into a single super report.
+    """
+    if not reports:
+        logger.warning("Combined run report skipped — no report data provided.")
+        return False
+
+    to_addr   = os.getenv("REPORT_EMAIL_TO")
+    from_addr = os.getenv("REPORT_EMAIL_FROM")
+    host      = os.getenv("REPORT_SMTP_HOST", "smtp.gmail.com")
+    port      = int(os.getenv("REPORT_SMTP_PORT", "587"))
+    user      = os.getenv("REPORT_SMTP_USER")
+    pwd       = os.getenv("REPORT_SMTP_PASSWORD")
+
+    if not all([to_addr, from_addr, user, pwd]):
+        logger.warning("Combined run report skipped — REPORT_* env vars not set.")
+        return False
+
+    total_ok = 0
+    total_fail = 0
+    total_skip = 0
+    
+    for r in reports:
+        total_ok += r.get("success_count", 0)
+        total_fail += r.get("failed_count", 0)
+        results = r.get("recipient_results") or []
+        total_skip += len([x for x in results if x.get("status") == "skipped"])
+
+    statuses = [r.get("final_status", "unknown") for r in reports]
+    if any(s == "timed_out" for s in statuses):
+        global_status = "timed_out"
+    elif all(s == "success" for s in statuses):
+        global_status = "success"
+    elif all(s == "failed" for s in statuses):
+        global_status = "failed"
+    else:
+        global_status = "partial_success"
+
+    _, emoji, label = _meta(global_status)
+    
+    start_times = [dt for r in reports if (dt := _parse_dt(r.get("started_at"))) is not None]
+    finish_times = [dt for r in reports if (dt := _parse_dt(r.get("finished_at"))) is not None]
+    global_start = min(start_times) if start_times else datetime.now()
+    global_finish = max(finish_times) if finish_times else datetime.now()
+    dur = _dur(global_start, global_finish)
+
+    subject = (
+        f"[WBL] Consolidated {emoji} {label} — {workflow_name} "
+        f"| ✔{total_ok} sent | ✗{total_fail} failed | ⊘{total_skip} invalid | {dur}"
+    )
+
+    body = _build_combined_html(
+        workflow_name=workflow_name,
+        schedule_id=schedule_id,
+        reports=reports,
+    )
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"]    = f"WBL Outreach <{from_addr}>"
+        msg["To"]      = to_addr
+        msg.attach(MIMEText(body, "html"))
+
+        with smtplib.SMTP(host, port, timeout=30) as s:
+            s.ehlo()
+            s.starttls()
+            s.ehlo()
+            s.login(user, pwd)
+            s.sendmail(from_addr, [to_addr], msg.as_string())
+
+        logger.info(
+            f"✅ Consolidated run report sent to {to_addr} — "
+            f"✔{total_ok} sent | ✗{total_fail} failed | ⊘{total_skip} invalid"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Consolidated run report email failed: {e}")
+        return False
