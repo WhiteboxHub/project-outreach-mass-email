@@ -16,10 +16,16 @@ class RetryManager:
         """
         Determines if an error is transient and worth retrying.
         """
-        # Add specific exception types here as we encounter them.
-        # For now, we assume network-related errors or 5xx codes (if we had response objects) are transient.
-        # We can refine this based on the specific libraries used (e.g., httpx.NetworkError).
-        
+        # Direct check on domain delivery exceptions
+        try:
+            from senders.base_sender import TransientDeliveryError, PermanentDeliveryError
+            if isinstance(exception, PermanentDeliveryError):
+                return False
+            if isinstance(exception, TransientDeliveryError):
+                return True
+        except ImportError:
+            pass
+
         error_msg = str(exception).lower()
         transient_keywords = [
             "timeout", 

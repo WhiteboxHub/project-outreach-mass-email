@@ -6,7 +6,14 @@ from executor.recipient_resolver import RecipientResolver
 from executor.engine_builder import EngineBuilder
 from models.recipient import Recipient
 from utils.retry import RetryManager
+from utils.idempotency import RecipientIdempotencyLedger
 import asyncio
+
+@pytest.fixture(autouse=True)
+def clean_idempotency_ledger():
+    RecipientIdempotencyLedger().clear()
+    yield
+    RecipientIdempotencyLedger().clear()
 
 # --- Template Tests ---
 def test_template_renderer_strict():

@@ -7,6 +7,12 @@ SCRIPT_DIR = str(pathlib.Path(__file__).parent.absolute())
 sys.path.insert(0, SCRIPT_DIR)
 os.chdir(SCRIPT_DIR)
 
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from dotenv import load_dotenv
 import os
 import logging

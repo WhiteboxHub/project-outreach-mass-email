@@ -20,6 +20,12 @@ SCRIPT_DIR = str(pathlib.Path(__file__).parent.absolute())
 sys.path.insert(0, SCRIPT_DIR)
 os.chdir(SCRIPT_DIR)
 
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from dotenv import load_dotenv
 import os
 load_dotenv()
@@ -69,8 +75,16 @@ for row in rows:
 print(f"\n[3] Extracted {len(emails)} email addresses from result")
 
 if not emails:
-    print("    ⚠ No emails found — nothing to validate.")
-    sys.exit(0)
+    print("    ⚠ No new emails found in DB for today's date.")
+    print("    💡 Running demonstration with sample addresses (valid MX vs invalid):\n")
+    emails = [
+        "recruiter@google.com",
+        "talent@microsoft.com",
+        "hiring@github.com",
+        "invalid-syntax-no-at",
+        "contact@nonexistent-domain-xyz987654.org",
+        "trailing.spaces @broken.com",
+    ]
 
 # 4. Run validation
 print(f"\n[4] Running validation (syntax + MX check)...")
