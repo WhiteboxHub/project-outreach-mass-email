@@ -1,6 +1,18 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 
+class DeliveryError(Exception):
+    """Base class for all delivery errors."""
+    pass
+
+class TransientDeliveryError(DeliveryError):
+    """Temporary failure (network drop, timeout, rate limit) that should be retried."""
+    pass
+
+class PermanentDeliveryError(DeliveryError):
+    """Fatal failure (invalid credentials, recipient rejected, 5xx) that should NOT be retried."""
+    pass
+
 class BaseSender(ABC):
     @abstractmethod
     async def send(self, 

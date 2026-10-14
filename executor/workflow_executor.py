@@ -10,7 +10,7 @@ from api_clients.template_client import TemplateClient
 from api_clients.delivery_engine_client import DeliveryEngineClient
 from api_clients.log_client import LogClient
 
-from .recipient_resolver import RecipientResolver
+from .recipient_resolver import RecipientResolver, UpstreamDependencyError
 from .template_renderer import TemplateRenderer
 from .engine_builder import EngineBuilder
 
@@ -18,6 +18,9 @@ from models.execution_log import LogStatus
 from utils.rate_limiter import TokenBucketRateLimiter
 from utils.retry import RetryManager
 from utils.report_mailer import send_run_report
+from utils.security import redact_sensitive_data, build_safe_unsubscribe_url
+from utils.idempotency import IdempotencyKey, RecipientIdempotencyLedger
+from senders.base_sender import TransientDeliveryError, PermanentDeliveryError
 
 logger = logging.getLogger("outreach_service")
 
@@ -37,7 +40,7 @@ class WorkflowExecutor:
         """
         if execution_context is None:
             execution_context = {}
-        logger.info(f"Starting execution for Workflow ID: {workflow_id} / Key: {workflow_key} [RunID: {run_id}] Context: {execution_context}")
+        logger.info(f"Starting execution for Workflow ID: {workflow_id} / Key: {workflow_key} [RunID: {run_id}] Context: {redact_sensitive_data(execution_context)}")
         
         # Initialize Execution State
         start_time = datetime.now()
@@ -230,10 +233,28 @@ class WorkflowExecutor:
             async def process_recipient(recipient):
                 nonlocal success_count, failed_count, completed_count
                 
+                # Check deadline before waiting
                 if datetime.now() > deadline:
                     return {"email": recipient.email, "status": "timed_out"}
 
+                ledger = RecipientIdempotencyLedger()
+                # Check pre-send suppression
+                if ledger.is_suppressed(recipient.email):
+                    logger.info(f"Skipping suppressed recipient: {recipient.email}")
+                    return {"email": recipient.email, "status": "suppressed"}
+
+                # Recipient-level idempotency check
+                c_id = execution_context.get("candidate_id", 0)
+                send_key = IdempotencyKey.compute_recipient_hash(workflow_id, recipient.email, c_id)
+                if ledger.is_already_sent(send_key):
+                    logger.info(f"Skipping already sent recipient (idempotency key {send_key[:8]}...): {recipient.email}")
+                    return {"email": recipient.email, "status": "already_sent"}
+
                 async with semaphore:
+                    # Check deadline after acquiring semaphore
+                    if datetime.now() > deadline:
+                        return {"email": recipient.email, "status": "timed_out"}
+
                     await rate_limiter.acquire()
                     try:
                         context = recipient.metadata.copy()
@@ -252,7 +273,8 @@ class WorkflowExecutor:
                             if v is None:
                                 context[k] = ""
                                 
-                        context["unsubscribe_link"] = f"http://unsubscribe.mock/{recipient.email}" 
+                        # Safe HMAC signed unsubscribe URL (no exposed email in params)
+                        context["unsubscribe_link"] = build_safe_unsubscribe_url(recipient.email)
 
                         # Determine reply-to for this specific send
                         current_reply_to = context.get("candidate_email") or context.get("reply_to") or engine_config.get("from_email")
@@ -270,7 +292,14 @@ class WorkflowExecutor:
                             text_body = text_body.replace("Hi None,", "Hi,").replace("Dear None,", "Dear,").replace("Hello None,", "Hello,")
 
                         logger.info(f"  [{completed_count + 1}/{total_to_send}] Sending → {recipient.email}")
-                        sent = await _send_with_retry(recipient, context, subject, html_body, text_body, current_reply_to)
+                        try:
+                            sent = await _send_with_retry(recipient, context, subject, html_body, text_body, current_reply_to)
+                        except PermanentDeliveryError as pe:
+                            logger.error(f"Permanent delivery rejection for {recipient.email}: {pe}")
+                            sent = False
+                        except Exception as ex:
+                            logger.error(f"Delivery failed after retry attempts for {recipient.email}: {ex}")
+                            sent = False
 
                         # Add a small delay to avoid SMTP throttling
                         await asyncio.sleep(2.0)
@@ -278,6 +307,7 @@ class WorkflowExecutor:
                         completed_count += 1
                         if sent:
                             success_count += 1
+                            ledger.record_sent(send_key)
                             logger.info(
                                 f"  [{completed_count}/{total_to_send}] ✔  {recipient.email}  "
                                 f"(sent {success_count} | failed {failed_count} | remaining {total_to_send - completed_count})"
@@ -337,16 +367,22 @@ class WorkflowExecutor:
                 final_status = "failed" 
 
             # Execute Success Reset SQL (e.g., reset run_daily_workflow to 0)
-            # We do this if success_count > 0 OR if we reached the end of the batch
-            # to ensure the candidate doesn't get stuck in "daily run" mode.
+            # We execute this only if success_count > 0 so a total failure does NOT clear
+            # candidate retry flags merely because an attempt occurred.
             reset_sql = params_config.get("success_reset_sql")
-            if reset_sql and (success_count > 0 or failed_count > 0): 
-                try:
-                    logger.info(f"Executing success reset SQL for workflow {workflow_id}...")
-                    self.workflow_client.execute_reset_sql(workflow_id, reset_sql, execution_context)
-                    logger.info("Successfully reset automation flags (run_daily_workflow etc).")
-                except Exception as e:
-                    logger.error(f"Failed to execute reset SQL via API: {e}")
+            if reset_sql:
+                if success_count > 0:
+                    try:
+                        logger.info(f"Executing success reset SQL for workflow {workflow_id}...")
+                        self.workflow_client.execute_reset_sql(workflow_id, reset_sql, execution_context)
+                        logger.info("Successfully reset automation flags (run_daily_workflow etc).")
+                    except Exception as e:
+                        logger.error(f"Failed to execute reset SQL via API: {e}")
+                else:
+                    logger.warning(
+                        f"Skipping success reset SQL for workflow {workflow_id} "
+                        f"because all {failed_count} delivery attempts failed."
+                    )
 
             # 8. Update Log
             # execution_metadata is intentionally NOT stored in the DB to keep
@@ -380,7 +416,7 @@ class WorkflowExecutor:
                 "started_at": start_time,
                 "finished_at": finished_at,
                 "recipient_results": recipient_results,
-                "execution_context": execution_context,
+                "execution_context": redact_sensitive_data(execution_context),
                 "schedule_id": schedule_id,
                 "error_summary": None,
             }
@@ -436,7 +472,7 @@ class WorkflowExecutor:
                 "started_at": start_time,
                 "finished_at": _finished_at,
                 "recipient_results": _locals.get("recipient_results", []),
-                "execution_context": execution_context,
+                "execution_context": redact_sensitive_data(execution_context),
                 "schedule_id": schedule_id,
                 "error_summary": str(e),
             }
@@ -479,7 +515,7 @@ class WorkflowExecutor:
                 "started_at": start_time,
                 "finished_at": datetime.now(),
                 "recipient_results": [],
-                "execution_context": execution_context,
+                "execution_context": redact_sensitive_data(execution_context),
                 "schedule_id": schedule_id,
                 "error_summary": str(e),
             }

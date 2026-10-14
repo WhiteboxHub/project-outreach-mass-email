@@ -6,6 +6,10 @@ import logging
 
 logger = logging.getLogger("outreach_service")
 
+class UpstreamDependencyError(Exception):
+    """Raised when an upstream dependency (Backend API, DB) fails."""
+    pass
+
 class RecipientResolver:
     """
     Resolves recipients by calling the backend API to execute SQL,
@@ -31,10 +35,13 @@ class RecipientResolver:
     ) -> Tuple[List[Recipient], List[str]]:
         """
         Returns (valid_recipients, invalid_emails).
+        Raises UpstreamDependencyError if backend API communication fails.
         """
         raw_recipients: List[Recipient] = []
         try:
             result = self.workflow_client.execute_sql(workflow_id, recipient_sql, parameters)
+            if result is None:
+                raise UpstreamDependencyError(f"Backend API returned None executing recipient SQL for workflow {workflow_id}")
 
             for data in result:
                 email = data.get("recipient_email") or data.get("email")
@@ -50,9 +57,11 @@ class RecipientResolver:
                         metadata=metadata,
                     ))
 
+        except UpstreamDependencyError:
+            raise
         except Exception as e:
-            logger.error(f"Error resolving recipients: {e}")
-            return [], []
+            logger.error(f"Upstream failure resolving recipients for workflow {workflow_id}: {e}")
+            raise UpstreamDependencyError(f"Error communicating with backend recipient service: {e}") from e
 
         if not raw_recipients:
             return [], []

@@ -4,7 +4,8 @@ from email.mime.text import MIMEText
 from typing import Optional, Dict, Any
 import logging
 import asyncio
-from .base_sender import BaseSender
+from .base_sender import BaseSender, TransientDeliveryError, PermanentDeliveryError
+import socket
 
 logger = logging.getLogger("outreach_service")
 
@@ -55,8 +56,6 @@ class SMTPSender(BaseSender):
             msg = MIMEMultipart("alternative")
             msg["Subject"] = subject
             
-            # Strip trailing/leading spaces from email addresses
-            # A trailing space (e.g., "email@...com ") can cause Gmail to silently drop the message.
             clean_from_email = from_email.strip() if from_email else ""
             clean_to_email = to_email.strip() if to_email else ""
 
@@ -73,9 +72,6 @@ class SMTPSender(BaseSender):
                 for key, value in headers.items():
                     msg.add_header(key, value)
 
-            # We remove explicit X-Mailer and X-Priority headers
-            # because they commonly trigger spam filters on standard SMTP accounts.
-
             if text_body:
                 msg.attach(MIMEText(text_body, "plain"))
             if html_body:
@@ -88,6 +84,22 @@ class SMTPSender(BaseSender):
                 server.sendmail(clean_from_email, [clean_to_email], msg.as_string())
             
             return True
+        except smtplib.SMTPAuthenticationError as e:
+            logger.error(f"Permanent SMTP Auth failure for {self.username}: {e}")
+            raise PermanentDeliveryError(f"SMTP Auth failed: {e}") from e
+        except (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused) as e:
+            logger.error(f"Permanent SMTP address refusal for {to_email}: {e}")
+            raise PermanentDeliveryError(f"SMTP address refused: {e}") from e
+        except smtplib.SMTPResponseException as e:
+            if 400 <= e.smtp_code < 500:
+                logger.warning(f"Transient SMTP error {e.smtp_code} for {to_email}: {e.smtp_error}")
+                raise TransientDeliveryError(f"Transient SMTP {e.smtp_code}: {e.smtp_error}") from e
+            else:
+                logger.error(f"Permanent SMTP error {e.smtp_code} for {to_email}: {e.smtp_error}")
+                raise PermanentDeliveryError(f"Permanent SMTP {e.smtp_code}: {e.smtp_error}") from e
+        except (smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected, TimeoutError, socket.timeout, OSError) as e:
+            logger.warning(f"Transient connection error sending to {to_email}: {e}")
+            raise TransientDeliveryError(f"Connection/Timeout: {e}") from e
         except Exception as e:
-            logger.error(f"SMTP send failed to {to_email}: {e}")
-            return False
+            logger.error(f"Unexpected SMTP error sending to {to_email}: {e}")
+            raise TransientDeliveryError(f"Unexpected error: {e}") from e

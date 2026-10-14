@@ -13,7 +13,11 @@ def test_health_check():
 def test_trigger_workflow(MockExecutor):
     mock_instance = MockExecutor.return_value
     
-    response = client.post("/api/v1/trigger", json={"workflow_id": 1})
+    response = client.post(
+        "/api/v1/trigger",
+        json={"workflow_id": 1},
+        headers={"X-API-Key": "wbl_outreach_secure_key_2026"}
+    )
     
     assert response.status_code == 200
     data = response.json()

@@ -2,7 +2,9 @@ from typing import Dict, Any
 from api_clients.delivery_engine_client import EngineType
 from senders.base_sender import BaseSender
 from senders.smtp_sender import SMTPSender
-from senders.mock_senders import MailgunSender, SendGridSender, AWSSESSender
+from senders.ses_sender import AWSSESSender
+from senders.sendgrid_sender import SendGridSender
+from senders.mailgun_sender import MailgunSender
 
 
 class EngineBuilder:
@@ -18,9 +20,13 @@ class EngineBuilder:
             raise ValueError("Missing 'from_email' in configuration.")
 
         if engine_type == EngineType.AWS_SES:
-            missing = [f for f in ["host", "username", "password"] if f not in config]
-            if missing:
-                raise ValueError(f"AWS SES requires: {missing}")
+            has_creds = (
+                ("username" in config and "password" in config) or
+                ("aws_access_key_id" in config and "aws_secret_access_key" in config) or
+                ("region_name" in config or "aws_region" in config)
+            )
+            if not has_creds:
+                raise ValueError("AWS SES requires credentials (aws_access_key_id/secret or username/password) or region")
         elif engine_type == EngineType.SENDGRID:
             if "api_key" not in config:
                 raise ValueError("SendGrid requires 'api_key'")

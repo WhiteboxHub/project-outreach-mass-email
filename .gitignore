@@ -32,3 +32,5 @@ Thumbs.db
 output/
 .pytest_cache/
 email-list-validator/emails.csv
+*.db
+

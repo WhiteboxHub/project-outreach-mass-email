@@ -14,7 +14,9 @@ from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Dict, Any, Optional
+from dotenv import load_dotenv
 
+load_dotenv()
 logger = logging.getLogger("outreach_service")
 
 _REDACT = {

@@ -1,8 +1,11 @@
 
 @echo off
-:: Navigate to the project directory
-:: Replace the path below with the actual path on your Windows machine
-cd /d "C:\Users\innovapathinc\Desktop\wbl\project-outreach-mass-email"
+:: Navigate to the project directory (uses current script directory dynamically)
+cd /d "%~dp0"
+
+:: Set UTF-8 console and Python I/O encoding
+chcp 65001 > nul
+set PYTHONIOENCODING=utf-8
 
 :: Activate the virtual environment and run the script
 call venv\Scripts\activate
